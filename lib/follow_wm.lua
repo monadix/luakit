@@ -8,7 +8,7 @@ local lousy = require("lousy")
 local ui = ipc_channel("follow_wm")
 
 local evaluators = {
-    click = function(element, page)
+    click = function(element, page, id)
         local tag = element.tag_name
         if tag == "INPUT" or tag == "TEXTAREA" then
             local t = element.attr.type
@@ -23,7 +23,7 @@ local evaluators = {
         -- Handle <a target=_blank> indirectly; WebKit prevents opening a new
         -- window if not initiated by the user directly
         if tag == "A" and element.attr.target == "_blank" then
-            ui:emit_signal(page, "click_a_target_blank", element.href)
+            ui:emit_signal(page, "click_a_target_blank", id, element.href)
             return
         end
         -- Find the element directly in the centre of the link
@@ -63,7 +63,7 @@ local evaluators = {
 
 local page_mode = {}
 
-local function follow_hint(page, mode, hint)
+local function follow_hint(page, mode, hint, id)
     local evaluator
     if type(mode.evaluator) == "string" then
         evaluator = evaluators[mode.evaluator]
@@ -75,13 +75,13 @@ local function follow_hint(page, mode, hint)
 
     local overlay_style = hint.overlay_elem.attr.style
     hint.overlay_elem.attr.style = "display: none;"
-    local ret = evaluator(hint.elem, page)
+    local ret = evaluator(hint.elem, page, id)
     hint.overlay_elem.attr.style = overlay_style
 
-    ui:emit_signal(page, "follow_func", ret)
+    ui:emit_signal(page, "follow_func", id, ret)
 end
 
-local function follow(page, all)
+local function follow(page, all, id)
     -- Build array of hints to follow
     local hints = all and select.hints(page) or { select.focused_hint(page) }
     hints = lousy.util.table.filter_array(hints, function (_, hint)
@@ -98,13 +98,14 @@ local function follow(page, all)
     -- Follow hints in idle cb to ensure select UI is closed if necessary
     luakit.idle_add(function ()
         for _, hint in pairs(hints) do
-            follow_hint(page, mode, hint)
+            follow_hint(page, mode, hint, id)
         end
+        ui:emit_signal(page, "finished", id)
     end)
 end
 
-ui:add_signal("follow", function(_, page, all)
-    follow(page, all)
+ui:add_signal("follow", function(_, page, all, id)
+    follow(page, all, id)
 end)
 
 ui:add_signal("focus", function(_, page, step)
@@ -119,11 +120,11 @@ ui:add_signal("enter", function(_, page, mode, ignore_case)
     ui:emit_signal(page, "matches", num_visible_hints)
 end)
 
-ui:add_signal("changed", function(_, page, hint_pat, text_pat, text)
+ui:add_signal("changed", function(_, page, hint_pat, text_pat, text, id)
     local _, num_visible_hints = select.changed(page, hint_pat, text_pat, text)
     ui:emit_signal(page, "matches", num_visible_hints)
     if num_visible_hints == 1 and text ~= "" then
-        follow(page, false)
+        follow(page, false, id)
     end
 end)
 

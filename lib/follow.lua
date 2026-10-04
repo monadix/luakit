@@ -211,20 +211,28 @@ local function ignore_keys(w)
     timer:start()
 end
 
+local next_operation = 0
+
+local function begin_follow(w, count)
+    next_operation = next_operation + 1
+    local operation = {
+        id = next_operation, mode = w.follow_state.mode, evaluator = w.follow_state.evaluator,
+        window = w, remaining = count, clicks = count,
+    }
+    broker.state(w.view).follow_operation = operation
+    return operation.id
+end
+
 local function do_follow(w, all)
-    local state = broker.state(w.view)
-    state.follow_replies = all and math.min(state.hints or 1, 1000) or 1
-    state.follow_clicks = state.follow_replies
-    follow_wm:emit_signal(w.view, "follow", all)
+    local count = all and math.min(broker.state(w.view).hints or 1, 1000) or 1
+    follow_wm:emit_signal(w.view, "follow", all, begin_follow(w, count))
 end
 
 local function follow_all_hints(w)
     do_follow(w, true)
 end
 
-local function follow_func_cb(w, ret)
-    local mode = w.follow_state.mode
-
+local function follow_func_cb(w, ret, mode)
     if mode.func then mode.func(ret) end
 
     -- don't set mode if func() changed it (e.g. to command mode)
@@ -250,19 +258,38 @@ local function active_follow(_, view)
         and broker.state(view).follow_active == true
 end
 
-follow_wm:add_web_signal("follow_func", broker.policy({ function (ret)
-    return ret == nil or type(ret) == "string" and #ret <= 8192 and not ret:find("%z")
-end }, function (channel, view, ret)
-    if not active_follow(channel, view) or (broker.state(view).follow_replies or 0) < 1 then return false end
-    local evaluator = require("webview").window(view).follow_state.evaluator
-    if evaluator == "uri" or evaluator == "src" or evaluator == "parent_href" then
+local function pending_follow(_, view, id)
+    local operation = broker.state(view).follow_operation
+    return operation ~= nil and operation.id == id and require("webview").window(view) == operation.window
+end
+
+follow_wm:add_web_signal("follow_func", broker.policy({ "id", function () return true end },
+function (channel, view, id, ret)
+    if not pending_follow(channel, view, id) then return false end
+    local operation = broker.state(view).follow_operation
+    if operation.remaining < 1 then return false end
+    -- The codec already validated custom results as bounded plain data.
+    if type(operation.evaluator) == "function" then return true end
+    if ret ~= nil and (type(ret) ~= "string" or #ret > 8192 or ret:find("%z")) then return false end
+    if operation.evaluator == "uri" or operation.evaluator == "src" or operation.evaluator == "parent_href" then
         return ret == nil or broker.uri(ret)
     end
     return true
-end), function (_, view, ret)
+end), function (_, view, _, ret)
     local state = broker.state(view)
-    state.follow_replies = state.follow_replies - 1
-    follow_func_cb(require("webview").window(view), ret)
+    local operation = state.follow_operation
+    operation.remaining = operation.remaining - 1
+    -- Mode teardown during this callback does not cancel the authorized batch.
+    operation.dispatching = true
+    local ok, err = pcall(follow_func_cb, operation.window, ret, operation.mode)
+    operation.dispatching = nil
+    if not ok or operation.remaining == 0 then
+        if state.follow_operation == operation then state.follow_operation = nil end
+    end
+    if not ok then error(err) end
+end)
+follow_wm:add_web_signal("finished", broker.policy({ "id" }, pending_follow), function (_, view)
+    broker.state(view).follow_operation = nil
 end)
 follow_wm:add_web_signal("matches", broker.policy({ function (n)
     return type(n) == "number" and n >= 0 and n <= 100000 and n == math.floor(n)
@@ -270,12 +297,14 @@ end }, active_follow), function (_, view, n)
     broker.state(view).hints = n
     matches_cb(require("webview").window(view), n)
 end)
-follow_wm:add_web_signal("click_a_target_blank", broker.policy({ "uri" }, function (channel, view)
-    return active_follow(channel, view) and (broker.state(view).follow_clicks or 0) > 0
-end), function (_, view, href)
-    local state = broker.state(view)
-    state.follow_clicks = state.follow_clicks - 1
-    require("webview").window(view):new_tab(href, { private = view.private })
+follow_wm:add_web_signal("click_a_target_blank", broker.policy({ "id", "uri" }, function (channel, view, id)
+    if not pending_follow(channel, view, id) then return false end
+    local operation = broker.state(view).follow_operation
+    return operation.evaluator == "click" and operation.clicks > 0
+end), function (_, view, _, href)
+    local operation = broker.state(view).follow_operation
+    operation.clicks = operation.clicks - 1
+    operation.window:new_tab(href, { private = view.private })
 end)
 
 new_mode("follow", {
@@ -311,7 +340,9 @@ new_mode("follow", {
             w.follow_persist = nil
         end
 
-        broker.state(view).follow_active = true
+        local state = broker.state(view)
+        if not state.follow_operation or not state.follow_operation.dispatching then state.follow_operation = nil end
+        state.follow_active = true
         w.follow_state = {
             mode = mode, view = view,
             evaluator = mode.evaluator,
@@ -339,16 +370,15 @@ new_mode("follow", {
         local pattern_maker = mode.pattern_maker or _M.pattern_maker
         local hint_pat, text_pat = pattern_maker(text)
 
-        if text ~= "" then
-            broker.state(w.view).follow_replies = 1
-            broker.state(w.view).follow_clicks = 1
-        end
-        follow_wm:emit_signal(w.view, "changed", hint_pat, text_pat, text)
+        local id = text ~= "" and begin_follow(w, 1) or nil
+        follow_wm:emit_signal(w.view, "changed", hint_pat, text_pat, text, id)
     end,
 
     leave = function (w)
         w:set_ibar_theme()
-        broker.state(w.view).follow_active = nil
+        local state = broker.state(w.follow_state.view)
+        state.follow_active = nil
+        if not state.follow_operation or not state.follow_operation.dispatching then state.follow_operation = nil end
         follow_wm:emit_signal(w.view, "leave")
     end,
 })

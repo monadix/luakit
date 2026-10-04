@@ -133,6 +133,59 @@ T.test_custom_labels_and_follow_evaluator_roundtrip = function ()
     assert(result == "https://example.com/")
 end
 
+local function follow_fixture(evaluator, all)
+    w:navigate(test.http_server() .. "broker.html")
+    test.wait_for_view(w.view)
+    local results = {}
+    w:set_mode("follow", {
+        selector = "uri", evaluator = evaluator,
+        func = function (value) results[#results + 1] = value end,
+    })
+    test.wait_until(function () return broker.state(w.view).hints == 2 end)
+    require("lousy.bind").hit(w, modes.get_mode("follow").binds, all and { "Shift" } or {}, "Return", {})
+    local operation = assert(broker.state(w.view).follow_operation)
+    test.wait_until(function () return #results == (all and 2 or 1) end)
+    test.wait_until(function () return broker.state(w.view).follow_operation == nil end)
+    return results, operation
+end
+
+T.test_follow_all_consumes_the_whole_authorized_batch = function ()
+    local results, operation = follow_fixture("uri", true)
+    table.sort(results)
+    assert(results[1] == "https://example.com/" and results[2] == "https://example.com/second")
+    send("follow_wm", "follow_func", operation.id, "https://example.com/forged")
+    assert(#results == 2)
+end
+
+T.test_custom_follow_evaluators_preserve_plain_data_results = function ()
+    local results = follow_fixture(function () return 42 end)
+    assert(results[1] == 42)
+    results = follow_fixture(function () return { [3.5] = "a\0b", enabled = true, value = 1.25 } end)
+    assert(results[1][3.5] == "a\0b" and results[1].enabled == true and results[1].value == 1.25)
+end
+
+T.test_follow_replies_are_bound_to_the_current_ui_operation = function ()
+    w:navigate(test.http_server() .. "broker.html")
+    test.wait_for_view(w.view)
+    local calls = 0
+    w:set_mode("follow", { selector = "uri", evaluator = "uri", func = function () calls = calls + 1 end })
+    test.wait_until(function () return broker.state(w.view).hints == 2 end)
+    modes.get_mode("follow").changed(w, "unmatched-one")
+    local old = assert(broker.state(w.view).follow_operation).id
+    modes.get_mode("follow").changed(w, "unmatched-two")
+    local current = assert(broker.state(w.view).follow_operation).id
+    send("follow_wm", "follow_func", old, "https://example.com/forged")
+    send("follow_wm", "follow_func", current, { forged = true })
+    send("follow_wm", "follow_func", current, "javascript:alert(1)")
+    local tabs = #w.tabs.children
+    send("follow_wm", "click_a_target_blank", current, "https://example.com/forged")
+    assert(#w.tabs.children == tabs)
+    assert(calls == 0)
+    w:set_mode()
+    send("follow_wm", "follow_func", current, "https://example.com/forged")
+    assert(calls == 0 and broker.state(w.view).follow_operation == nil)
+end
+
 T.test_formfiller_fills_using_ui_owned_dsl_call = function ()
     local path = luakit.data_dir .. "/forms.lua"
     local f = assert(io.open(path, "w"))
