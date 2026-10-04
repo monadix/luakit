@@ -26,11 +26,16 @@ local function run_profile(profile, symlink)
 local ui = ipc_channel("isolated_wm")
 local uri = require("lousy.uri")
 local lfs = require("lfs")
+local registered_called = false
+luakit.register_function(".*", "isolated_registered", function (_, resolve)
+    registered_called = true
+    resolve("registered")
+end)
 ui:add_signal("ping", function (_, page)
     local denied = io.open(DENIED, "r")
     local readonly = io.open(READONLY, "a")
     local writable = io.open(WRITABLE, "w")
-    local ok = denied == nil and readonly == nil and writable ~= nil
+    local ok = denied == nil and readonly == nil and writable ~= nil and registered_called
     if denied then denied:close() end
     if readonly then readonly:close() end
     if writable then writable:write("explicit grant"); writable:close() end
@@ -50,7 +55,6 @@ luakit.add_path_to_sandbox(WRITEDIR, false)
 local view = widget{ type = "webview" }
 local window = widget{ type = "window" }
 window.child = view
-window:show()
 assert(not pcall(luakit.add_path_to_sandbox, WRITEDIR))
 local waiting = true
 wm:add_web_signal("pong", {
@@ -65,9 +69,15 @@ wm:add_web_signal("pong", {
     luakit.quit(0)
 end)
 view:add_signal("load-status", function (v, status)
-    if status == "finished" then wm:emit_signal(v, "ping") end
+    if status == "finished" then
+        v:eval_js("isolated_registered(); typeof isolated_registered", { callback = function (value)
+            assert(value == "function")
+            wm:emit_signal(v, "ping")
+        end })
+    end
 end)
 view.uri = "about:blank"
+window:show()
 local timeout = timer{ interval = 10000 }
 timeout:add_signal("timeout", function () luakit.quit(1) end)
 timeout:start()

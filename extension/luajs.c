@@ -116,6 +116,8 @@ luaJS_registered_function_callback(GPtrArray *args, struct cb_data *user_data)
     /* Make promise */
     js_promise_t *promise = g_slice_new(js_promise_t);
     new_promise(context, promise);
+    /* A Lua callback can resolve synchronously and free the promise record. */
+    JSCValue *result = promise->promise;
 
     luaH_page_from_web_page(L, webkit_web_extension_get_page(extension.ext, ctx->page_id));
 
@@ -145,7 +147,7 @@ luaJS_registered_function_callback(GPtrArray *args, struct cb_data *user_data)
     luaH_dofunction(L, argc + 3, 0);
 
     lua_settop(L, top);
-    return promise->promise;
+    return result;
 }
 
 static void luaJS_registered_function_destroy(void *user_data)

@@ -101,6 +101,8 @@ webkit_web_extension_initialize_with_user_data(WebKitWebExtension *ext, GVariant
     extension.ipc = ipc_endpoint_new("WebContext");
 
     web_lua_init(package_path, package_cpath);
+    web_luajs_init();
+    web_script_world_init();
     for (gsize i = 0; i < g_variant_n_children(modules); i++) {
         const char *name;
         g_variant_get_child(modules, i, "&s", &name);
@@ -109,8 +111,6 @@ webkit_web_extension_initialize_with_user_data(WebKitWebExtension *ext, GVariant
     g_variant_unref(modules);
     web_extension_connect();
     web_scroll_init();
-    web_luajs_init();
-    web_script_world_init();
 
     debug("PID %d", getpid());
     debug("ready for messages");

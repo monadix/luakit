@@ -51,6 +51,31 @@ T.test_unknown_javascript_callbacks_are_rejected = function ()
     util.inject(view, "eval_js", { view.id, {}, "pointer" })
 end
 
+T.test_pending_javascript_callback_rejects_cross_view_stale_and_duplicate_replies = function ()
+    view.uri = test.http_server() .. "scroll.html"
+    test.wait_for_view(view)
+    local count = 0
+    view:eval_js("42", { callback = function (value)
+        assert(value == 42)
+        count = count + 1
+    end })
+    -- This isolated test process has made at most one previous eval request.
+    -- Try both IDs before letting the renderer's real reply enter the main loop.
+    for id = 1, 2 do
+        util.inject(other, "eval_js", { other.id, id, 42 })
+        util.inject(view, "eval_js", { view.id, id, 42 }, -1)
+    end
+    assert(count == 0)
+    for id = 1, 2 do util.inject(view, "eval_js", { view.id, id, 42 }) end
+    assert(count == 1)
+    for id = 1, 2 do
+        util.inject(view, "eval_js", { view.id, id, 42 })
+        util.inject(other, "eval_js", { other.id, id, 42 })
+    end
+    test.delay(100)
+    assert(count == 1)
+end
+
 T.test_confirmation_requires_ui_approval_and_expires_on_navigation = function ()
     util.confirm_response(false)
     assert(luakit.confirm(view, "Test operation", "/immutable/target") == false)

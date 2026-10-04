@@ -54,9 +54,9 @@ ipc_recv_lua_ipc(ipc_endpoint_t *UNUSED(ipc), const void *msg, guint length)
 }
 
 void
-ipc_recv_extension_init(ipc_endpoint_t *UNUSED(ipc), gpointer UNUSED(msg), guint UNUSED(length))
+ipc_recv_extension_init(ipc_endpoint_t *ipc, gpointer UNUSED(msg), guint UNUSED(length))
 {
-    luakit_lib_emit_pending_signals(common.L);
+    luakit_lib_emit_page_created(common.L, ipc);
 }
 
 void

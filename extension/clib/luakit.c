@@ -34,30 +34,9 @@
 
 /* lua luakit class for signals */
 static lua_class_t luakit_class;
-static GPtrArray *queued_emissions;
 
 /* setup luakit module signals */
 LUA_CLASS_FUNCS(luakit, luakit_class)
-
-static void
-emit_page_created_signal(WebKitWebPage *web_page, lua_State *L)
-{
-    luaH_page_from_web_page(L, web_page);
-    signal_object_emit(L, luakit_class.signals, "page-created", 1, 0);
-}
-
-static void
-page_created_cb(WebKitWebExtension *UNUSED(extension), WebKitWebPage *web_page, lua_State *L)
-{
-    /* Since web modules are loaded after the first web page is created, signal
-     * handlers bound to the page-created signal will not be called for the
-     * first web page... unless we queue the signal and emit it later, when the
-     * configuration file (and therefore all modules) has been loaded */
-    if (queued_emissions)
-        g_ptr_array_add(queued_emissions, web_page);
-    else
-        emit_page_created_signal(web_page, L);
-}
 
 static gint
 luaH_luakit_index(lua_State *L)
@@ -138,17 +117,16 @@ luakit_lib_setup(lua_State *L)
     /* export luakit lib */
     luaH_openlib(L, "luakit", luakit_lib, luakit_lib);
 
-    queued_emissions = g_ptr_array_sized_new(1);
-    g_signal_connect(extension.ext, "page-created", G_CALLBACK(page_created_cb), L);
 }
 
 void
-luakit_lib_emit_pending_signals(lua_State *L)
+luakit_lib_emit_page_created(lua_State *L, ipc_endpoint_t *ipc)
 {
-    if (!queued_emissions) return;
-    g_ptr_array_foreach(queued_emissions, (GFunc)emit_page_created_signal, L);
-    g_ptr_array_free(queued_emissions, TRUE);
-    queued_emissions = NULL;
+    if (!ipc->target || !WEBKIT_IS_WEB_PAGE(ipc->target) || ipc->creation_notified) return;
+    /* Every page waits for its own UI-selected generation and module load. */
+    ipc->creation_notified = TRUE;
+    luaH_page_from_web_page(L, WEBKIT_WEB_PAGE(ipc->target));
+    signal_object_emit(L, luakit_class.signals, "page-created", 1, 0);
 }
 
 // vim: ft=c:et:sw=4:ts=8:sts=4:tw=80

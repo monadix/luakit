@@ -1484,6 +1484,9 @@ widget_webview(lua_State *L, widget_t *w, luakit_token_t UNUSED(token))
 
     /* Create a new endpoint with one ref (this webview) */
     d->ipc = ipc_endpoint_new("UI");
+    /* The first load chooses generation 1 before page-created Lua handlers
+     * are released; otherwise their replies can race initial navigation. */
+    d->ipc->generation = 0;
 
     w->widget = GTK_WIDGET(d->view);
     ipc_bind_webview(w);

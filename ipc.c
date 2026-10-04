@@ -74,8 +74,10 @@ ipc_recv_page_created(ipc_endpoint_t *ipc, const void *UNUSED(msg), guint length
     /* Include requests made while this renderer was starting. require caches
      * each module, so already-loaded modules do not duplicate handlers. */
     web_module_load_modules_on_endpoint(ipc);
-    ipc_header_t header = { .type = IPC_TYPE_extension_init };
-    ipc_send(ipc, &header, NULL);
+    if (ipc->generation > 0) {
+        ipc_header_t header = { .type = IPC_TYPE_extension_init };
+        ipc_send(ipc, &header, NULL);
+    }
     webview_connect_to_endpoint(ipc->owner, ipc);
 }
 
