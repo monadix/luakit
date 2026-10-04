@@ -20,7 +20,7 @@ local function send(channel, signal, ...)
 end
 
 T.test_chrome_cannot_select_another_internal_page = function ()
-    w.view.uri = "luakit://help/"
+    w:navigate("luakit://help/")
     test.wait_for_view(w.view)
     local original = require("editor").edit
     local called = 0
@@ -32,7 +32,7 @@ T.test_chrome_cannot_select_another_internal_page = function ()
 end
 
 T.test_unsolicited_follow_navigation_download_and_error_buttons_are_rejected = function ()
-    w.view.uri = "about:blank"
+    w:navigate("about:blank")
     test.wait_for_view(w.view)
     local uri, tabs = w.view.uri, #w.tabs.children
     send("follow_selected_wm", "navigate", "javascript:alert(1)")
@@ -59,7 +59,7 @@ T.test_formfiller_rejects_source_and_renderer_selected_dsl_extensions = function
 end
 
 T.test_javascript_callback_is_one_shot_and_cross_view_bound = function ()
-    w.view.uri = "about:blank"
+    w:navigate("about:blank")
     test.wait_for_view(w.view)
     local calls = 0
     w.view:eval_js("42", { callback = function (ret) calls = calls + 1; assert(ret == 42) end })
@@ -69,13 +69,56 @@ T.test_javascript_callback_is_one_shot_and_cross_view_bound = function ()
     assert(calls == 1)
 end
 
+T.test_renderer_navigation_to_internal_pages_requires_ui_confirmation = function ()
+    local origin = test.http_server() .. "hello_world.html"
+    w:navigate(origin)
+    test.wait_for_view(w.view)
+    local original = luakit.confirm
+    local prompts = 0
+    luakit.confirm = function (view, operation, target)
+        assert(view == w.view and operation == "Open privileged page" and target == "luakit://binds/")
+        prompts = prompts + 1
+        return original(view, operation, target)
+    end
+    util.confirm_response(false)
+    w.view:eval_js('window.location = "luakit://binds/"', { no_return = true })
+    test.delay(400)
+    assert(prompts == 1 and w.view.uri == origin, tostring(prompts) .. ": " .. w.view.uri)
+    util.confirm_response(true)
+    w.view:eval_js('window.location = "luakit://binds/"', { no_return = true })
+    test.wait_for_view(w.view)
+    assert(prompts == 2 and w.view.uri == "luakit://binds/")
+    luakit.confirm = original
+end
+
+T.test_file_navigation_requires_approval_but_exact_ui_load_is_allowed = function ()
+    local origin = test.http_server() .. "hello_world.html"
+    w:navigate(origin)
+    test.wait_for_view(w.view)
+    local target = "file://" .. require("lfs").currentdir() .. "/tests/html/broker.html"
+    local original, prompts = luakit.confirm, 0
+    luakit.confirm = function (view, operation, uri)
+        assert(view == w.view and operation == "Open privileged page" and uri == target)
+        prompts = prompts + 1
+        return false
+    end
+    -- Bypass the UI URI setter to exercise an unselected WebKit policy request.
+    util.request_navigation(w.view, target)
+    test.wait_until(function () return prompts == 1 end)
+    assert(w.view.uri == origin)
+    w.view.uri = target
+    test.wait_for_view(w.view)
+    assert(w.view.uri == target and prompts == 1)
+    luakit.confirm = original
+end
+
 local function evaluate(script)
     w.view:eval_js(script, { callback = test.continue })
     return test.wait()
 end
 
 T.test_custom_labels_and_follow_evaluator_roundtrip = function ()
-    w.view:load_string('<html><body><a href="https://example.com/">link</a></body></html>', "https://example.com/")
+    w:navigate(test.http_server() .. "broker.html")
     test.wait_for_view(w.view)
     local select_module = require("select")
     select_module.label_maker = function (s) return s.trim(s.charset("ab")) end
@@ -93,15 +136,18 @@ end
 T.test_formfiller_fills_using_ui_owned_dsl_call = function ()
     local path = luakit.data_dir .. "/forms.lua"
     local f = assert(io.open(path, "w"))
-    f:write('on "example.com" { form { id = "login", input { name = "username", value = test_value("saved") } } }')
+    f:write('on "broker%.html" { form { id = "login", input { name = "username", value = test_value("saved") } } }')
     f:close()
     local calls = 0
     formfiller.extend({ test_value = function (arg) calls = calls + 1; return arg .. " value" end })
-    local html = '<html><body><form id="login"><input name="username"></form></body></html>'
-    w.view:load_string(html, "https://example.com/")
+    w:navigate(test.http_server() .. "broker.html")
     test.wait_for_view(w.view)
-    local bind = require("lousy.bind")
-    assert(bind.hit(w, modes.get_mode("normal").binds, {}, "l", { buffer = "z", enable_buffer = true }))
+    local action
+    for _, binding in ipairs(modes.get_mode("normal").binds) do
+        if binding[2].desc == "Load formfiller form (use first profile)." then action = binding[2].func end
+    end
+    assert(action)(w)
+    assert(next(broker.state(w.view).forms or {}) ~= nil, "no form operation at " .. w.view.uri)
     test.wait_until(function () return calls == 1 end)
     test.wait_until(function () return next(broker.state(w.view).forms or {}) == nil end)
     assert(evaluate('document.querySelector("input").value') == "saved value")

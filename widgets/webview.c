@@ -48,6 +48,8 @@ typedef struct {
              stylesheet_refreshed;
     /** Current webview uri */
     gchar *uri;
+    /** One exact navigation target selected by trusted UI Lua. */
+    gchar *navigation_uri;
     /** Currently hovered uri */
     gchar *hover;
 
@@ -172,6 +174,13 @@ webview_get_by_id(guint64 view_id)
 
 static void update_uri(widget_t *w, const gchar *uri);
 
+static void
+webview_authorize_navigation(webview_data_t *d, const char *uri)
+{
+    g_free(d->navigation_uri);
+    d->navigation_uri = g_strdup(uri);
+}
+
 #include "widgets/webview/javascript.c"
 #include "widgets/webview/downloads.c"
 #include "widgets/webview/history.c"
@@ -187,6 +196,7 @@ luaH_webview_load_string(lua_State *L)
     webview_data_t *d = luaH_checkwvdata(L, 1);
     const gchar *string = luaL_checkstring(L, 2);
     const gchar *base_uri = luaL_checkstring(L, 3);
+    webview_authorize_navigation(d, base_uri);
     webkit_web_view_load_alternate_html(d->view, string, base_uri, NULL);
     return 0;
 }
@@ -402,6 +412,7 @@ load_changed_cb(WebKitWebView* UNUSED(v), WebKitLoadEvent e, widget_t *w)
     update_uri(w, NULL);
 
     if (e == WEBKIT_LOAD_STARTED) {
+        g_clear_pointer(&d->navigation_uri, g_free);
         run_javascript_cancel(d->ipc);
         ipc_endpoint_invalidate(d->ipc);
         if (d->ipc->status == IPC_ENDPOINT_CONNECTED) {
@@ -474,6 +485,35 @@ create_cb(WebKitWebView* v, WebKitNavigationAction* UNUSED(a), widget_t *w)
 }
 
 static gboolean
+webview_approve_navigation(widget_t *w, const char *uri)
+{
+    webview_data_t *d = w->data;
+    gboolean selected = d->navigation_uri && !g_strcmp0(d->navigation_uri, uri);
+    g_clear_pointer(&d->navigation_uri, g_free);
+    char *scheme = g_uri_parse_scheme(uri);
+    gboolean privileged = scheme && (!g_ascii_strcasecmp(scheme, "luakit") || !g_ascii_strcasecmp(scheme, "file"));
+    g_free(scheme);
+    if (selected || !privileged) return TRUE;
+
+    ipc_endpoint_t *ipc = d->ipc;
+    if (!ipc_endpoint_incref(ipc)) return FALSE;
+    guint64 generation = ipc->generation;
+    lua_State *L = common.L;
+    int top = lua_gettop(L);
+    luaH_object_push(L, w->ref);
+    lua_pushliteral(L, "Open privileged page");
+    lua_pushstring(L, uri);
+    lua_getglobal(L, "luakit");
+    lua_getfield(L, -1, "confirm");
+    lua_remove(L, -2);
+    gboolean approved = luaH_dofunction(L, 3, 1) && lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1);
+    approved = approved && ipc->owner == w && ipc->generation == generation;
+    lua_settop(L, top);
+    ipc_endpoint_decref(ipc);
+    return approved;
+}
+
+static gboolean
 decide_policy_cb(WebKitWebView* UNUSED(v), WebKitPolicyDecision *p,
         WebKitPolicyDecisionType type, widget_t *w)
 {
@@ -500,6 +540,10 @@ decide_policy_cb(WebKitWebView* UNUSED(v), WebKitPolicyDecision *p,
           const gchar *signal_name = type == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION
                 ? "navigation-request" : "new-window-decision";
           const gchar *uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(na));
+          if (!webview_approve_navigation(w, uri)) {
+              webkit_policy_decision_ignore(p);
+              return TRUE;
+          }
           gchar *reason = NULL;
 
           switch (webkit_navigation_action_get_navigation_type(na)) {
@@ -569,6 +613,7 @@ static gint
 luaH_webview_reload(lua_State *L)
 {
     webview_data_t *d = luaH_checkwvdata(L, 1);
+    webview_authorize_navigation(d, webkit_web_view_get_uri(d->view));
     webkit_web_view_reload(d->view);
     return 0;
 }
@@ -577,6 +622,7 @@ static gint
 luaH_webview_reload_bypass_cache(lua_State *L)
 {
     webview_data_t *d = luaH_checkwvdata(L, 1);
+    webview_authorize_navigation(d, webkit_web_view_get_uri(d->view));
     webkit_web_view_reload_bypass_cache(d->view);
     return 0;
 }
@@ -927,6 +973,7 @@ luaH_webview_newindex(lua_State *L, widget_t *w, luakit_token_t token)
 
       case L_TK_URI:
         uri = parse_uri(luaL_checklstring(L, 3, &len));
+        webview_authorize_navigation(d, uri);
         webkit_web_view_load_uri(d->view, uri);
         update_uri(w, uri);
         g_free(uri);
@@ -1289,6 +1336,7 @@ webview_destructor(widget_t *w)
 
     g_ptr_array_remove(globalconf.webviews, w);
     g_free(d->uri);
+    g_free(d->navigation_uri);
     g_free(d->hover);
     g_object_unref(G_OBJECT(d->user_content));
     if (d->cert)
@@ -1324,6 +1372,7 @@ webview_crashed_cb(WebKitWebView *UNUSED(view), widget_t *w)
 {
     /* Invalidate all capabilities belonging to the terminated renderer. */
     webview_data_t *d = w->data;
+    g_clear_pointer(&d->navigation_uri, g_free);
     run_javascript_cancel(d->ipc);
     ipc_endpoint_disconnect(d->ipc);
     d->ipc->creation_notified = FALSE;

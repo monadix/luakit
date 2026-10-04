@@ -115,6 +115,14 @@ confirm_navigation(lua_State *L)
 }
 
 static int
+request_navigation(lua_State *L)
+{
+    widget_t *w = luaH_checkwebview(L, 1);
+    webkit_web_view_load_uri(WEBKIT_WEB_VIEW(w->widget), luaL_checkstring(L, 2));
+    return 0;
+}
+
+static int
 terminate_process(lua_State *L)
 {
     widget_t *w = luaH_checkwebview(L, 1);
@@ -128,6 +136,7 @@ luaopen_tests_broker_util(lua_State *L)
     static const struct luaL_Reg funcs[] = {
         { "inject", inject },
         { "terminate_process", terminate_process },
+        { "request_navigation", request_navigation },
         { "confirm_response", confirm_response },
         { "confirm_navigation", confirm_navigation },
         { NULL, NULL },

@@ -77,5 +77,8 @@
 -- downloaded-file opening or certificate exceptions. This displays trusted GTK
 -- UI and returns true only after approval in the same document. Keep the target
 -- immutable and consume pending operations before invoking privileged code.
+-- Renderer navigation into internal or local-file pages also requires trusted
+-- confirmation. UI-selected loads, reloads and history targets are authorized
+-- for their exact destination.
 
 -- vim: et:sw=4:ts=8:sts=4:tw=80
