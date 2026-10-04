@@ -22,6 +22,16 @@
 #include <lua.h>
 #include <glib.h>
 
+#define IPC_MESSAGE_LIMIT (16 * 1024 * 1024)
+#define IPC_STRING_LIMIT (1024 * 1024)
+#define IPC_DEPTH_LIMIT 32
+#define IPC_VALUE_LIMIT 100000
+
+void lua_serialize_trusted_range(lua_State *, GByteArray *, gint, gint);
+#ifdef LUAKIT_WEB_EXTENSION
+int lua_deserialize_trusted_range(lua_State *, const guint8 *, guint);
+#endif
+
 void lua_serialize_range(lua_State *L, GByteArray *out, gint start, gint end);
 int lua_deserialize_range(lua_State *L, const guint8 *in, guint length);
 

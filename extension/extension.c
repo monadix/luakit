@@ -92,19 +92,22 @@ web_lua_init(const char *package_path, const char *package_cpath)
 G_MODULE_EXPORT void
 webkit_web_extension_initialize_with_user_data(WebKitWebExtension *ext, GVariant *payload)
 {
-    gchar *socket_path, *package_path, *package_cpath;
-    g_variant_get(payload, "(sss)", &socket_path, &package_path, &package_cpath);
+    const gchar *package_path, *package_cpath;
+    GVariant *modules;
+    g_variant_get(payload, "(&s&s@as)", &package_path, &package_cpath, &modules);
 
     common.L = luaL_newstate();
     extension.ext = ext;
-    extension.ipc = ipc_endpoint_new(g_strdup_printf("Web[%d]", getpid()));
-
-    if (web_extension_connect(socket_path)) {
-        debug("connecting to UI thread failed");
-        exit(EXIT_FAILURE);
-    }
+    extension.ipc = ipc_endpoint_new("WebContext");
 
     web_lua_init(package_path, package_cpath);
+    for (gsize i = 0; i < g_variant_n_children(modules); i++) {
+        const char *name;
+        g_variant_get_child(modules, i, "&s", &name);
+        ipc_recv_lua_require_module(extension.ipc, (const void *)name, strlen(name) + 1);
+    }
+    g_variant_unref(modules);
+    web_extension_connect();
     web_scroll_init();
     web_luajs_init();
     web_script_world_init();
@@ -112,8 +115,7 @@ webkit_web_extension_initialize_with_user_data(WebKitWebExtension *ext, GVariant
     debug("PID %d", getpid());
     debug("ready for messages");
 
-    ipc_header_t header = { .type = IPC_TYPE_extension_init, .length = 0 };
-    ipc_send(extension.ipc, &header, NULL);
+
 }
 
 // vim: ft=c:et:sw=4:ts=8:sts=4:tw=80

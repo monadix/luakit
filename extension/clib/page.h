@@ -34,6 +34,7 @@ typedef struct _page_t {
     gpointer ref;
 } page_t;
 
+page_t *luaH_check_page(lua_State *, gint);
 void page_class_setup(lua_State *);
 gint luaH_page_from_web_page(lua_State *L, WebKitWebPage *web_page);
 

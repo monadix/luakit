@@ -16,345 +16,211 @@
  *
  */
 
-#include <stdlib.h>
-
 #include "common/lualib.h"
 #include "common/luaserialize.h"
 #include "common/ipc.h"
-#include "log.h"
+#ifdef LUAKIT_WEB_EXTENSION
+#include "extension/extension.h"
+#else
+#include "web_context.h"
+#endif
 
-/* Prototypes for ipc_recv_... functions */
-#define X(name) void ipc_recv_##name(ipc_endpoint_t *ipc, const void *msg, guint length);
-    IPC_TYPES
+#define X(name) void ipc_recv_##name(ipc_endpoint_t *, const void *, guint);
+IPC_TYPES
 #undef X
-
-/*
- * Default process name is "UI" because the UI process currently sends IPC
- * messages before the IPC channel is opened (these messages are queued),
- * and sending IPC messages writes log messages which include the process
- * name.
- */
-
-static GThread *send_thread;
-static GAsyncQueue *send_queue;
-/** IPC endpoints for all webviews */
-static GPtrArray *endpoints;
-
-typedef struct _queued_ipc_t {
-    ipc_header_t header;
-    ipc_endpoint_t *ipc;
-    char payload[0];
-} queued_ipc_t;
-
-const GPtrArray *
-ipc_endpoints_get(void)
-{
-    if (!endpoints)
-        endpoints = g_ptr_array_sized_new(1);
-    return endpoints;
-}
 
 static void
-ipc_dispatch(ipc_endpoint_t *ipc, ipc_header_t header, gpointer payload)
+send_message(ipc_endpoint_t *ipc, WebKitUserMessage *message)
 {
-    if (header.type != IPC_TYPE_log)
-        debug("Process '%s': recv " ANSI_COLOR_BLUE "%s" ANSI_COLOR_RESET " message",
-                ipc->name, ipc_type_name(header.type));
-    switch (header.type) {
-#define X(name) case IPC_TYPE_##name: ipc_recv_##name(ipc, payload, header.length); break;
-        IPC_TYPES
-#undef X
-        default:
-            fatal("Received message with invalid type 0x%x", header.type);
-    }
+#ifdef LUAKIT_WEB_EXTENSION
+    if (ipc->target && WEBKIT_IS_WEB_PAGE(ipc->target))
+        webkit_web_page_send_message_to_view(WEBKIT_WEB_PAGE(ipc->target), message, NULL, NULL, NULL);
+    else
+        webkit_web_extension_send_message_to_context(extension.ext, message, NULL, NULL, NULL);
+#else
+    if (ipc->target)
+        webkit_web_view_send_message_to_page(WEBKIT_WEB_VIEW(ipc->target), message, NULL, NULL, NULL);
+    else
+        webkit_web_context_send_message_to_all_extensions(web_context_get(), message);
+#endif
 }
 
-static gpointer
-ipc_send_thread(gpointer UNUSED(user_data))
+void
+ipc_send_variant(ipc_endpoint_t *ipc, ipc_type_t type, GVariant *args)
 {
-    while (TRUE) {
-        queued_ipc_t *out = g_async_queue_pop(send_queue);
-        ipc_endpoint_t *ipc = out->ipc;
-        ipc_header_t *header = &out->header;
-        gpointer data = out->payload;
-
-        /* On any step here, the channel can disappear */
-        if((ipc->channel != NULL) && (ipc->status == IPC_ENDPOINT_CONNECTED))
-            g_io_channel_write_chars(ipc->channel, (gchar*)header, sizeof(*header), NULL, NULL);
-
-        if((ipc->channel != NULL) && (ipc->status == IPC_ENDPOINT_CONNECTED))
-            g_io_channel_write_chars(ipc->channel, (gchar*)data, header->length, NULL, NULL);
-
-        if((ipc->channel != NULL) && (ipc->status == IPC_ENDPOINT_CONNECTED))
-            ipc_endpoint_decref(ipc);
-        else
-            error("Trying to send an ipc message, but the endpoint went away.");
-
-        g_free(out);
+    args = g_variant_ref_sink(args);
+    if (!ipc || ipc->status == IPC_ENDPOINT_FREED ||
+        g_variant_get_size(args) > IPC_MESSAGE_LIMIT) {
+        g_variant_unref(args);
+        return;
     }
-
-    return NULL;
+    GVariant *params = g_variant_new("(usttv)", 1u, ipc_type_name(type),
+            ++ipc->next_request, ipc->generation, args);
+    g_variant_unref(args);
+    WebKitUserMessage *message = webkit_user_message_new("luakit-ipc-v1", params);
+    g_object_ref_sink(message);
+    if (ipc->status == IPC_ENDPOINT_CONNECTED)
+        send_message(ipc, message);
+    else if (g_queue_get_length(ipc->queue) < 256)
+        g_queue_push_tail(ipc->queue, g_object_ref(message));
+    g_object_unref(message);
 }
 
 void
 ipc_send(ipc_endpoint_t *ipc, const ipc_header_t *header, const void *data)
 {
-    if (!send_thread) {
-        send_queue = g_async_queue_new();
-        send_thread = g_thread_new("send_thread", ipc_send_thread, NULL);
-    }
-
-    /* Keep the endpoint alive while the message is being sent */
-    if (!ipc_endpoint_incref(ipc))
-        return;
-
-    if (header->type != IPC_TYPE_log)
-        debug("Process '%s': send " ANSI_COLOR_BLUE "%s" ANSI_COLOR_RESET " message",
-                ipc->name, ipc_type_name(header->type));
-
-    g_assert((header->length == 0) == (data == NULL));
-
-    /* Alloc and push a queued message; the send thread frees it */
-    queued_ipc_t *msg = g_malloc(sizeof(*msg) + header->length);
-    msg->ipc = ipc;
-    msg->header = *header;
-    if (header->length)
-        memcpy(msg->payload, data, header->length);
-
-    if (ipc->channel)
-        g_async_queue_push(send_queue, msg);
-    else
-        g_queue_push_tail(ipc->queue, msg);
+    ipc_send_variant(ipc, header->type, g_variant_new_fixed_array(
+                G_VARIANT_TYPE_BYTE, data, header->length, 1));
 }
 
 static void
-ipc_recv_and_dispatch_or_enqueue(ipc_endpoint_t *ipc)
+send_lua(ipc_endpoint_t *ipc, ipc_type_t type, lua_State *L, int start, int end, gboolean trusted)
 {
-    g_assert(ipc);
-
-    ipc_recv_state_t *state = &ipc->recv_state;
-    GIOChannel *channel = ipc->channel;
-
-    gchar *buf = (state->hdr_done ? state->payload : &state->hdr) + state->bytes_read;
-    gsize remaining = (state->hdr_done ? state->hdr.length : sizeof(state->hdr)) - state->bytes_read;
-    gsize bytes_read;
-    GError *error = NULL;
-
-    switch (g_io_channel_read_chars(channel, buf, remaining, &bytes_read, &error)) {
-        case G_IO_STATUS_NORMAL:
-            break;
-        case G_IO_STATUS_AGAIN:
-            return;
-        case G_IO_STATUS_EOF:
-            verbose("g_io_channel_read_chars(): End Of File received");
-            /* OSX and NetBSD are sending EOF on nonblocking channels first.
-             * These requests can be ignored. They should end up in
-             * recv_hup(), but unfortunately they do not.
-             *
-             * If we do not close the socket, glib will continue to
-             * call the G_IO_IN handler.
-             *
-             * We decrement the refcount to 1 here, and when ipc_recv
-             * decrements the refcount to zero, the socket will be
-             * disconnected.
-             */
-            g_atomic_int_dec_and_test(&ipc->refcount);
-            return;
-        case G_IO_STATUS_ERROR:
-            if (!g_str_equal(ipc->name, "UI"))
-            if (!g_str_equal(error->message, "Connection reset by peer"))
-                error("g_io_channel_read_chars(): %s", error->message);
-            g_error_free(error);
-            return;
-        default:
-            g_assert_not_reached();
-    }
-
-    /* Update ipc_recv state */
-    state->bytes_read += bytes_read;
-    remaining -= bytes_read;
-
-    if (remaining > 0)
-        return;
-
-    /* If we've just finished downloading the header... */
-    if (!state->hdr_done) {
-        /* ... update state, and try to download payload */
-        state->hdr_done = TRUE;
-        state->bytes_read = 0;
-        state->payload = g_malloc(state->hdr.length);
-        ipc_recv_and_dispatch_or_enqueue(ipc);
-        return;
-    }
-
-    /* Otherwise, we finished downloading the message */
-    ipc_dispatch(ipc, state->hdr, state->payload);
-    g_free(state->payload);
-
-    /* Reset state for the next message */
-    state->payload = NULL;
-    state->bytes_read = 0;
-    state->hdr_done = FALSE;
-}
-
-/* Callback function for channel watch */
-static gboolean
-ipc_recv(GIOChannel *UNUSED(channel), GIOCondition UNUSED(cond), ipc_endpoint_t *ipc)
-{
-    if (!ipc_endpoint_incref(ipc))
-        return TRUE;
-    ipc_recv_and_dispatch_or_enqueue(ipc);
-    ipc_endpoint_decref(ipc);
-    return TRUE;
-}
-
-static gboolean
-ipc_hup(GIOChannel *UNUSED(channel), GIOCondition UNUSED(cond), ipc_endpoint_t *ipc)
-{
-    g_assert(ipc->status == IPC_ENDPOINT_CONNECTED);
-    g_assert(ipc->channel);
-    ipc_endpoint_decref(ipc);
-    return TRUE;
+    GByteArray *buf = g_byte_array_new();
+    if (trusted) lua_serialize_trusted_range(L, buf, start, end);
+    else lua_serialize_range(L, buf, start, end);
+    GBytes *bytes = g_byte_array_free_to_bytes(buf);
+    GVariant *args = g_variant_new_from_bytes(G_VARIANT_TYPE("av"), bytes, TRUE);
+    g_bytes_unref(bytes);
+    ipc_send_variant(ipc, type, args);
 }
 
 void
-ipc_send_lua(ipc_endpoint_t *ipc, ipc_type_t type, lua_State *L, gint start, gint end)
+ipc_send_lua(ipc_endpoint_t *ipc, ipc_type_t type, lua_State *L, int start, int end)
 {
-    GByteArray *buf = g_byte_array_new();
-    lua_serialize_range(L, buf, start, end);
-    ipc_header_t header = { .type = type, .length = buf->len };
-    ipc_send(ipc, &header, buf->data);
-    g_byte_array_unref(buf);
+    send_lua(ipc, type, L, start, end, FALSE);
+}
+
+void
+ipc_send_lua_trusted(ipc_endpoint_t *ipc, lua_State *L, int start, int end)
+{
+    send_lua(ipc, IPC_TYPE_lua_trusted, L, start, end, TRUE);
+}
+
+gboolean
+ipc_receive(ipc_endpoint_t *ipc, gpointer data)
+{
+    WebKitUserMessage *message = data;
+    if (g_strcmp0(webkit_user_message_get_name(message), "luakit-ipc-v1"))
+        return FALSE;
+    GVariant *params = webkit_user_message_get_parameters(message);
+    if (!params || g_variant_get_size(params) > IPC_MESSAGE_LIMIT ||
+        !g_variant_is_of_type(params, G_VARIANT_TYPE("(usttv)")) ||
+        !g_variant_is_normal_form(params))
+        return TRUE;
+    guint version;
+    const char *operation;
+    guint64 request, generation;
+    GVariant *args;
+    g_variant_get(params, "(u&sttv)", &version, &operation, &request, &generation, &args);
+    ipc_type_t type = 0;
+#define X(name) if (!strcmp(operation, #name)) type = IPC_TYPE_##name;
+    IPC_TYPES
+#undef X
+    gboolean valid = version == 1 && request > 0 && type != 0;
+#ifdef LUAKIT_WEB_EXTENSION
+    /* Only the UI chooses document generations. */
+    if (valid && ipc->target && WEBKIT_IS_WEB_PAGE(ipc->target)) {
+        if (generation < ipc->generation) valid = FALSE;
+        else ipc->generation = generation;
+    }
+#else
+    /* Context traffic is diagnostic-only. It has no originating view. */
+    if (!ipc->owner && type != IPC_TYPE_log) valid = FALSE;
+    if (type != IPC_TYPE_page_created && generation != ipc->generation) valid = FALSE;
+    if (type == IPC_TYPE_page_created && ipc->status == IPC_ENDPOINT_CONNECTED) valid = FALSE;
+    if (type == IPC_TYPE_lua_require_module || type == IPC_TYPE_lua_trusted ||
+        type == IPC_TYPE_extension_init || type == IPC_TYPE_crash) valid = FALSE;
+#endif
+    gboolean lua = type == IPC_TYPE_lua_ipc || type == IPC_TYPE_lua_trusted ||
+        type == IPC_TYPE_eval_js || type == IPC_TYPE_log || type == IPC_TYPE_scroll;
+    if (!g_variant_is_of_type(args, lua ? G_VARIANT_TYPE("av") : G_VARIANT_TYPE("ay")))
+        valid = FALSE;
+    if (type == IPC_TYPE_log) {
+        gint64 now = g_get_monotonic_time();
+        if (now - ipc->log_window > G_USEC_PER_SEC) {
+            ipc->log_window = now;
+            ipc->log_count = 0;
+        }
+        if (++ipc->log_count > 100 || g_variant_get_size(args) > 16384)
+            valid = FALSE;
+    }
+    if (valid) {
+        ipc->received_request = request;
+        const void *payload = g_variant_get_data(args);
+        guint length = g_variant_get_size(args);
+        /* lua handlers receive the serialized av; raw operations receive ay. */
+        switch (type) {
+#define X(name) case IPC_TYPE_##name: ipc_recv_##name(ipc, payload, length); break;
+            IPC_TYPES
+#undef X
+          default: break;
+        }
+    }
+    g_variant_unref(args);
+    return TRUE;
 }
 
 ipc_endpoint_t *
 ipc_endpoint_new(const gchar *name)
 {
     ipc_endpoint_t *ipc = g_slice_new0(ipc_endpoint_t);
-
-    ipc->name = (gchar*)name;
+    ipc->name = g_strdup(name);
     ipc->queue = g_queue_new();
-    ipc->status = IPC_ENDPOINT_DISCONNECTED;
     ipc->refcount = 1;
-    ipc->creation_notified = FALSE;
-
+    ipc->generation = 1;
     return ipc;
+}
+
+void
+ipc_endpoint_bind(ipc_endpoint_t *ipc, GObject *target, gpointer owner)
+{
+    ipc->target = target;
+    ipc->owner = owner;
+}
+
+void
+ipc_endpoint_activate(ipc_endpoint_t *ipc)
+{
+    ipc->status = IPC_ENDPOINT_CONNECTED;
+    while (!g_queue_is_empty(ipc->queue)) {
+        WebKitUserMessage *message = g_queue_pop_head(ipc->queue);
+        send_message(ipc, message);
+        g_object_unref(message);
+    }
+}
+
+void
+ipc_endpoint_invalidate(ipc_endpoint_t *ipc)
+{
+    ipc->generation++;
+    while (!g_queue_is_empty(ipc->queue))
+        g_object_unref(g_queue_pop_head(ipc->queue));
 }
 
 WARN_UNUSED gboolean
 ipc_endpoint_incref(ipc_endpoint_t *ipc)
 {
-    /* Prevents incref/decref race */
-    int old;
-    do {
-        old = g_atomic_int_get(&ipc->refcount);
-        if (old < 1)
-            return FALSE;
-    } while (!g_atomic_int_compare_and_exchange(&ipc->refcount, old, old+1));
+    if (!ipc || ipc->refcount < 1) return FALSE;
+    ipc->refcount++;
     return TRUE;
-}
-
-static void
-ipc_endpoint_incref_no_check(ipc_endpoint_t *ipc)
-{
-    g_atomic_int_inc(&ipc->refcount);
-}
-
-void
-ipc_endpoint_decref(ipc_endpoint_t *ipc)
-{
-    if (!g_atomic_int_dec_and_test(&ipc->refcount))
-        return;
-    if (ipc->status == IPC_ENDPOINT_CONNECTED)
-        ipc_endpoint_disconnect(ipc);
-    if (ipc->queue) {
-        while (!g_queue_is_empty(ipc->queue)) {
-            queued_ipc_t *msg = g_queue_pop_head(ipc->queue);
-            g_free(msg);
-        }
-        g_queue_free(ipc->queue);
-    }
-    ipc->status = IPC_ENDPOINT_FREED;
-    g_slice_free(ipc_endpoint_t, ipc);
-}
-
-void
-ipc_endpoint_connect_to_socket(ipc_endpoint_t *ipc, int sock)
-{
-    g_assert(ipc);
-    g_assert(ipc->status == IPC_ENDPOINT_DISCONNECTED);
-
-    ipc_recv_state_t *state = &ipc->recv_state;
-    state->queued_ipcs = g_ptr_array_new();
-
-    GIOChannel *channel = g_io_channel_unix_new(sock);
-    g_io_channel_set_encoding(channel, NULL, NULL);
-    g_io_channel_set_buffered(channel, FALSE);
-    state->watch_in_id = g_io_add_watch(channel, G_IO_IN, (GIOFunc)ipc_recv, ipc);
-    state->watch_hup_id = g_io_add_watch(channel, G_IO_HUP, (GIOFunc)ipc_hup, ipc);
-
-    /* Atomically update ipc->channel. This is done because on the web extension
-     * thread, logging spawns a message send thread, which may attempt to write
-     * to the uninitialized channel after it has been created with
-     * g_io_channel_unix_new(), but before it has been set up fully */
-    g_atomic_pointer_set(&ipc->channel, channel);
-
-    ipc->status = IPC_ENDPOINT_CONNECTED;
-
-    if (!endpoints)
-        endpoints = g_ptr_array_sized_new(1);
-
-    /* Add the endpoint; it should never be present already */
-    g_assert(!g_ptr_array_remove_fast(endpoints, ipc));
-    g_ptr_array_add(endpoints, ipc);
-}
-
-ipc_endpoint_t *
-ipc_endpoint_replace(ipc_endpoint_t *orig, ipc_endpoint_t *new)
-{
-    g_assert(orig);
-    g_assert(new);
-    g_assert(orig->status == IPC_ENDPOINT_DISCONNECTED);
-    g_assert(new->status == IPC_ENDPOINT_CONNECTED);
-
-    /* Incref always succeeds because this is called from a message
-     * handler, which holds a temporary ref to the ipc channel  */
-    ipc_endpoint_incref_no_check(new);
-
-    /* Send all queued messages */
-    if (orig->queue) {
-        while (!g_queue_is_empty(orig->queue)) {
-            queued_ipc_t *msg = g_queue_pop_head(orig->queue);
-            msg->ipc = new;
-            ipc_endpoint_incref_no_check(new);
-            g_async_queue_push(send_queue, msg);
-        }
-
-        g_queue_free(orig->queue);
-        orig->queue = NULL;
-    }
-
-    ipc_endpoint_decref(orig);
-    return new;
 }
 
 void
 ipc_endpoint_disconnect(ipc_endpoint_t *ipc)
 {
-    g_assert(ipc->status == IPC_ENDPOINT_CONNECTED);
-    g_assert(ipc->channel);
-
-    g_ptr_array_remove_fast(endpoints, ipc);
-
-    /* Remove watches */
-    ipc_recv_state_t *state = &ipc->recv_state;
-    g_source_remove(state->watch_in_id);
-    g_source_remove(state->watch_hup_id);
-
-    /* Close channel */
-    g_io_channel_shutdown(ipc->channel, TRUE, NULL);
     ipc->status = IPC_ENDPOINT_DISCONNECTED;
-    ipc->channel = NULL;
+    ipc_endpoint_invalidate(ipc);
+}
+
+void
+ipc_endpoint_decref(ipc_endpoint_t *ipc)
+{
+    if (!ipc || --ipc->refcount) return;
+    ipc_endpoint_invalidate(ipc);
+    g_queue_free(ipc->queue);
+    g_free(ipc->name);
+    g_slice_free(ipc_endpoint_t, ipc);
 }
 
 // vim: ft=c:et:sw=4:ts=8:sts=4:tw=80

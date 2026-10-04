@@ -24,49 +24,85 @@
 #include "common/ipc.h"
 #include "common/luaserialize.h"
 
+typedef struct {
+    guint64 id;
+    ipc_endpoint_t *ipc;
+    guint64 generation;
+    gpointer callback;
+} javascript_request_t;
+
+static GHashTable *javascript_requests;
+static guint64 javascript_next_id;
+
+static void
+run_javascript_cancel(ipc_endpoint_t *ipc)
+{
+    if (!javascript_requests) return;
+    GHashTableIter iter;
+    gpointer value;
+    g_hash_table_iter_init(&iter, javascript_requests);
+    while (g_hash_table_iter_next(&iter, NULL, &value)) {
+        javascript_request_t *request = value;
+        if (request->ipc == ipc) {
+            luaH_object_unref(common.L, request->callback);
+            g_hash_table_iter_remove(&iter);
+        }
+    }
+}
+
 void
-run_javascript_finished(const guint8 *msg, guint length)
+run_javascript_finished(ipc_endpoint_t *ipc, const guint8 *msg, guint length)
 {
     lua_State *L = common.L;
-    gint top = lua_gettop(L);
-    gint n = lua_deserialize_range(L, msg, length);
-    g_assert_cmpint(n, >=, 2);
-    g_assert_cmpint(n, <=, 4);
-    /* Lua stack: [page_id, cb], [page_id, cb, nil, err] or [page_id, cb, ret] */
-
-    widget_t *w = webview_get_by_id(lua_tointeger(L, -n));
-    lua_remove(L, -n);
-    n--;
-    gpointer cb = lua_touserdata(L, -n);
-    if(!cb) {
-        warn("javascript finshed called on non object");
-        return;
+    int top = lua_gettop(L);
+    int n = lua_deserialize_range(L, msg, length);
+    if (n < 2 || n > 4 || lua_type(L, top + 1) != LUA_TNUMBER ||
+        lua_type(L, top + 2) != LUA_TNUMBER || !javascript_requests) goto done;
+    double number = lua_tonumber(L, top + 2);
+    if (number < 1 || number > 9007199254740991.0 || number != (guint64)number) goto done;
+    guint64 id = number;
+    javascript_request_t *request = g_hash_table_lookup(javascript_requests, &id);
+    if (!request || request->ipc != ipc || request->generation != ipc->generation || !ipc->owner)
+        goto done;
+    widget_t *w = ipc->owner;
+    if (lua_tonumber(L, top + 1) != webkit_web_view_get_page_id(WEBKIT_WEB_VIEW(w->widget))) goto done;
+    if (n == 4 && (lua_type(L, top + 3) != LUA_TNIL || lua_type(L, top + 4) != LUA_TSTRING)) goto done;
+    gpointer callback = request->callback;
+    /* Consume before callback invocation: reentrant and duplicate replies fail. */
+    g_hash_table_remove(javascript_requests, &id);
+    if (n >= 3) {
+        luaH_object_push(L, callback);
+        luaH_dofunction(L, n - 2, 0);
     }
-    lua_remove(L, -n);
-    n--;
-
-    if (n == 2) { /* Nil return value and Error */
-        g_assert(lua_isnil(L, -2));
-        g_assert(lua_isstring(L, -1));
-    }
-
-    if (n >= 1 && cb && w) {
-        luaH_object_push(L, cb);
-        luaH_dofunction(L, n, 0);
-    }
-
-    if (w && cb) {
-        g_signal_handlers_disconnect_by_data(w->widget, cb);
-        luaH_object_unref(L, cb);
-    }
-
+    luaH_object_unref(L, callback);
+done:
     lua_settop(L, top);
 }
 
-static void
-run_javascript_webview_closed(WebKitWebView *UNUSED(view), gpointer cb)
+static guint64
+run_javascript_register(lua_State *L, ipc_endpoint_t *ipc, gpointer callback)
 {
-    luaH_object_unref(common.L, cb);
+    if (!callback) return 0;
+    if (!javascript_requests)
+        javascript_requests = g_hash_table_new_full(g_int64_hash, g_int64_equal, NULL, g_free);
+    guint count = 0;
+    GHashTableIter iter;
+    gpointer value;
+    g_hash_table_iter_init(&iter, javascript_requests);
+    while (g_hash_table_iter_next(&iter, NULL, &value))
+        if (((javascript_request_t *)value)->ipc == ipc) count++;
+    if (count >= 256 || javascript_next_id >= 9007199254740991ULL) {
+        luaH_object_unref(L, callback);
+        luaL_error(L, "too many pending JavaScript callbacks");
+        return 0;
+    }
+    javascript_request_t *request = g_new0(javascript_request_t, 1);
+    request->id = ++javascript_next_id;
+    request->ipc = ipc;
+    request->generation = ipc->generation;
+    request->callback = callback;
+    g_hash_table_insert(javascript_requests, &request->id, request);
+    return request->id;
 }
 
 static gint
@@ -74,7 +110,9 @@ luaH_webview_eval_js(lua_State *L)
 {
     gpointer cb = NULL;
     webview_data_t *d = luaH_checkwvdata(L, 1);
-    const gchar *script = luaL_checkstring(L, 2);
+    size_t script_len;
+    const gchar *script = luaL_checklstring(L, 2, &script_len);
+    if (script_len > IPC_STRING_LIMIT) return luaL_error(L, "JavaScript source too large");
     const gchar *usr_source = NULL;
     gchar *source = NULL;
     bool no_return = false;
@@ -85,6 +123,8 @@ luaH_webview_eval_js(lua_State *L)
     /* source filename to use in error messages and webinspector */
     if (luaH_rawfield(L, 3, "source") && lua_isstring(L, -1))
         usr_source = lua_tostring(L, -1);
+    if (usr_source && strlen(usr_source) > IPC_STRING_LIMIT)
+        return luaL_error(L, "JavaScript source name too large");
     if (luaH_rawfield(L, 3, "no_return"))
         no_return = lua_toboolean(L, -1);
     if (luaH_rawfield(L, 3, "callback")) {
@@ -98,14 +138,12 @@ luaH_webview_eval_js(lua_State *L)
 
     lua_pushboolean(L, no_return);
     lua_pushstring(L, script);
-    lua_pushstring(L, usr_source ? g_strdup(usr_source) : source);
+    lua_pushstring(L, usr_source ? usr_source : source);
+    g_free(source);
     lua_pushinteger(L, webkit_web_view_get_page_id(d->view));
-    lua_pushlightuserdata(L, cb);
+    lua_pushnumber(L, run_javascript_register(L, d->ipc, cb));
     ipc_send_lua(d->ipc, IPC_TYPE_eval_js, L, -5, -1);
     lua_pop(L, 5);
-
-    if (cb)
-        g_signal_connect(d->view, "destroy", G_CALLBACK(run_javascript_webview_closed), cb);
 
     return FALSE;
 }

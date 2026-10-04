@@ -267,7 +267,6 @@ luaH_parserc(const gchar *confpath, gboolean run)
         setenv("LUAKIT_QUEUED_EMISSIONS_FILE", log_dump_file, TRUE);
         g_free(log_dump_file);
     }
-    ipc_remove_socket_file();
     execvp(escaped_execpath, (gchar**)argv->pdata);
 
 bailout:

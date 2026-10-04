@@ -21,8 +21,9 @@
 
 #include "common/ipc.h"
 
-void web_module_lib_setup(lua_State *);
 void web_module_load_modules_on_endpoint(ipc_endpoint_t *ipc);
+GVariant *web_module_get_names(void);
+void web_module_lib_setup(lua_State *);
 
 #endif
 

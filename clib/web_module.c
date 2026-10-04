@@ -25,7 +25,18 @@ static int
 luaH_require_web_module(lua_State *L)
 {
     const char *name = luaL_checkstring(L, -1);
-    g_ptr_array_add(required_web_modules, g_strdup(name));
+    if (!*name || strlen(name) > 255) return luaL_error(L, "invalid web module name");
+    gboolean found = FALSE;
+    for (guint i = 0; i < required_web_modules->len; i++)
+        if (!strcmp(name, required_web_modules->pdata[i])) found = TRUE;
+    if (!found) {
+        g_ptr_array_add(required_web_modules, g_strdup(name));
+        ipc_endpoint_t *ipc = ipc_endpoint_new("broadcast");
+        ipc->status = IPC_ENDPOINT_CONNECTED;
+        ipc_header_t header = { .type = IPC_TYPE_lua_require_module, .length = strlen(name) + 1 };
+        ipc_send(ipc, &header, name);
+        ipc_endpoint_decref(ipc);
+    }
 
     /* Return an IPC channel with the same name for convenience */
     return luaH_ipc_channel_new(L);
@@ -34,14 +45,21 @@ luaH_require_web_module(lua_State *L)
 void
 web_module_load_modules_on_endpoint(ipc_endpoint_t *ipc)
 {
-    for (unsigned i = 0; i < required_web_modules->len; i++) {
-        const gchar *module_name = required_web_modules->pdata[i];
-        ipc_header_t header = {
-            .type = IPC_TYPE_lua_require_module,
-            .length = strlen(module_name)+1
-        };
-        ipc_send(ipc, &header, module_name);
+    for (guint i = 0; i < required_web_modules->len; i++) {
+        const char *name = required_web_modules->pdata[i];
+        ipc_header_t header = { .type = IPC_TYPE_lua_require_module, .length = strlen(name) + 1 };
+        ipc_send(ipc, &header, name);
     }
+}
+
+GVariant *
+web_module_get_names(void)
+{
+    GVariantBuilder b;
+    g_variant_builder_init(&b, G_VARIANT_TYPE("as"));
+    for (guint i = 0; i < required_web_modules->len; i++)
+        g_variant_builder_add(&b, "s", (char *)required_web_modules->pdata[i]);
+    return g_variant_builder_end(&b);
 }
 
 void

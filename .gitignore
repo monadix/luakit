@@ -24,3 +24,5 @@ buildopts.h
 tags
 cscope.*
 
+tests/security/codec-ui
+tests/security/codec-web

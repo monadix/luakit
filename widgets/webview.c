@@ -30,7 +30,7 @@
 #include "clib/request.h"
 #include "common/signal.h"
 #include "web_context.h"
-#include "common/ipc.h"
+#include "ipc.h"
 #include "common/luayield.h"
 
 typedef struct {
@@ -375,6 +375,8 @@ luaH_webview_push_source(lua_State *L)
     return luaH_yield(L);
 }
 
+static void run_javascript_cancel(ipc_endpoint_t *);
+
 static void
 load_changed_cb(WebKitWebView* UNUSED(v), WebKitLoadEvent e, widget_t *w)
 {
@@ -400,6 +402,12 @@ load_changed_cb(WebKitWebView* UNUSED(v), WebKitLoadEvent e, widget_t *w)
     update_uri(w, NULL);
 
     if (e == WEBKIT_LOAD_STARTED) {
+        run_javascript_cancel(d->ipc);
+        ipc_endpoint_invalidate(d->ipc);
+        if (d->ipc->status == IPC_ENDPOINT_CONNECTED) {
+            ipc_header_t header = { .type = IPC_TYPE_extension_init };
+            ipc_send(d->ipc, &header, NULL);
+        }
         ((webview_data_t*) w->data)->is_committed = FALSE;
     } else if (e == WEBKIT_LOAD_COMMITTED || e == WEBKIT_LOAD_FINISHED) {
         ((webview_data_t*) w->data)->is_committed = TRUE;
@@ -1274,6 +1282,8 @@ webview_destructor(widget_t *w)
     g_idle_remove_by_data(w);
 
     g_assert(d->ipc);
+    run_javascript_cancel(d->ipc);
+    d->ipc->owner = NULL;
     ipc_endpoint_decref(d->ipc);
     d->ipc = NULL;
 
@@ -1312,9 +1322,11 @@ luakit_uri_scheme_request_cb(WebKitURISchemeRequest *request, const gchar *schem
 gboolean
 webview_crashed_cb(WebKitWebView *UNUSED(view), widget_t *w)
 {
-    /* Give webview a new disconnected IPC endpoint */
+    /* Invalidate all capabilities belonging to the terminated renderer. */
     webview_data_t *d = w->data;
-    d->ipc = ipc_endpoint_new("UI");
+    run_javascript_cancel(d->ipc);
+    ipc_endpoint_disconnect(d->ipc);
+    d->ipc->creation_notified = FALSE;
 
     /* Emit 'crashed' signal on web view */
     lua_State *L = common.L;
@@ -1325,15 +1337,20 @@ webview_crashed_cb(WebKitWebView *UNUSED(view), widget_t *w)
     return FALSE;
 }
 
+static void
+webview_terminated_cb(WebKitWebView *view, WebKitWebProcessTerminationReason UNUSED(reason), widget_t *w)
+{
+    webview_crashed_cb(view, w);
+}
+
 void
 webview_connect_to_endpoint(widget_t *w, ipc_endpoint_t *ipc)
 {
     g_assert(w->info->tok == L_TK_WEBVIEW);
     g_assert(ipc);
 
-    /* Replace old endpoint with new, sendinq queued data */
-    webview_data_t *d = w->data;
-    d->ipc = ipc_endpoint_replace(d->ipc, ipc);
+    /* Release queued operations for this view. */
+    ipc_endpoint_activate(ipc);
 
     lua_State *L = common.L;
 
@@ -1420,6 +1437,7 @@ widget_webview(lua_State *L, widget_t *w, luakit_token_t UNUSED(token))
     d->ipc = ipc_endpoint_new("UI");
 
     w->widget = GTK_WIDGET(d->view);
+    ipc_bind_webview(w);
 
     /* insert data into global tables and arrays */
     g_ptr_array_add(globalconf.webviews, w);
@@ -1430,7 +1448,7 @@ widget_webview(lua_State *L, widget_t *w, luakit_token_t UNUSED(token))
       "signal::button-release-event",                 G_CALLBACK(webview_button_cb),            w,
       "signal::scroll-event",                         G_CALLBACK(webview_scroll_cb),            w,
       "signal::create",                               G_CALLBACK(create_cb),                    w,
-      "signal::web-process-crashed",                  G_CALLBACK(webview_crashed_cb),           w,
+      "signal::web-process-terminated",               G_CALLBACK(webview_terminated_cb),        w,
       "signal::draw",                                 G_CALLBACK(expose_cb),                    w,
       "signal::mouse-target-changed",                 G_CALLBACK(mouse_target_changed_cb),      w,
       "signal::key-press-event",                      G_CALLBACK(key_press_cb),                 w,

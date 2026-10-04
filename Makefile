@@ -11,7 +11,7 @@ HEADS = $(wildcard *.h) $(wildcard common/*.h) $(wildcard common/clib/*.h) $(wil
 OBJS  = $(foreach obj,$(SRCS:.c=.o),$(obj))
 
 EXT_SRCS = $(filter-out $(TSRC),$(wildcard extension/*.c) $(wildcard extension/clib/*.c) $(wildcard common/*.c)) $(wildcard common/clib/*.c) $(TSRC)
-EXT_OBJS = $(foreach obj,$(EXT_SRCS:.c=.o),$(obj))
+EXT_OBJS = $(foreach obj,$(EXT_SRCS:.c=.web.o),$(obj))
 
 # List of sources used to generate Lua API documentation
 # Must be kept in sync with doc/docgen.ld
@@ -54,13 +54,13 @@ buildopts.h: buildopts.h.in
 		-e 's#LUAKIT_LIB_PATH .*#LUAKIT_LIB_PATH "$(LIBDIR)"#' \
 		buildopts.h.in > buildopts.h
 
-$(filter-out $(EXT_OBJS),$(OBJS)) $(EXT_OBJS): $(HEADS) config.mk
+$(filter-out $(EXT_OBJS),$(OBJS)) $(EXT_OBJS): $(HEADS) config.mk Makefile
 
 $(filter-out $(EXT_OBJS),$(OBJS)) : %.o : %.c
 	@echo $(CC) -c $< -o $@
 	@$(CC) -c $(CFLAGS) $(CPPFLAGS) $< -o $@
 
-$(EXT_OBJS) : %.o : %.c
+$(EXT_OBJS) : %.web.o : %.c
 	@echo $(CC) -c $< -o $@
 	@$(CC) -c $(CFLAGS) -DLUAKIT_WEB_EXTENSION -fPIC $(CPPFLAGS) $< -o $@
 
@@ -132,3 +132,11 @@ run-tests: luakit luakit.so tests/util.so
 
 newline: options;@echo
 .PHONY: all clean options install newline apidoc doc default
+
+test-ipc-codec: buildopts.h $(THEAD)
+	$(CC) $(CFLAGS) $(CPPFLAGS) tests/security/codec.c common/luaserialize.c $(LDFLAGS) -o tests/security/codec-ui
+	./tests/security/codec-ui
+	$(CC) $(CFLAGS) $(CPPFLAGS) -DLUAKIT_WEB_EXTENSION tests/security/codec.c common/luaserialize.c $(LDFLAGS) -o tests/security/codec-web
+	./tests/security/codec-web
+
+.PHONY: test-ipc-codec

@@ -145,6 +145,7 @@ luakit_lib_setup(lua_State *L)
 void
 luakit_lib_emit_pending_signals(lua_State *L)
 {
+    if (!queued_emissions) return;
     g_ptr_array_foreach(queued_emissions, (GFunc)emit_page_created_signal, L);
     g_ptr_array_free(queued_emissions, TRUE);
     queued_emissions = NULL;

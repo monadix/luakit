@@ -20,11 +20,13 @@
 #define LUAKIT_COMMON_IPC_H
 
 #include <glib.h>
+#include <glib-object.h>
 #include "common/util.h"
 
 #define IPC_TYPES \
     X(lua_require_module) \
     X(lua_ipc) \
+    X(lua_trusted) \
     X(scroll) \
     X(extension_init) \
     X(eval_js) \
@@ -43,7 +45,7 @@ typedef enum { IPC_TYPES } ipc_type_t;
 
 #define IPC_TYPE_ANY (-1)
 
-/** Fixed size header prepended to each message */
+/** Internal description of a raw operation; never sent as a wire header. */
 typedef struct _ipc_header_t {
     /** The length of the message in bytes, not including the header */
     guint length;
@@ -73,11 +75,6 @@ typedef struct _ipc_scroll_t {
     ipc_scroll_subtype_t subtype;
 } ipc_scroll_t;
 
-typedef struct _ipc_page_created_t {
-    guint64 page_id;
-    pid_t pid;
-} ipc_page_created_t;
-
 /* Message names */
 static inline const char *
 ipc_type_name(ipc_type_t type)
@@ -91,16 +88,6 @@ ipc_type_name(ipc_type_t type)
     }
 }
 
-typedef struct _ipc_recv_state_t {
-    guint watch_in_id, watch_hup_id;
-    GPtrArray *queued_ipcs;
-
-    ipc_header_t hdr;
-    gpointer payload;
-    gsize bytes_read;
-    gboolean hdr_done;
-} ipc_recv_state_t;
-
 typedef enum {
     IPC_ENDPOINT_DISCONNECTED,
     IPC_ENDPOINT_CONNECTED,
@@ -108,31 +95,33 @@ typedef enum {
 } ipc_endpoint_status_t;
 
 typedef struct _ipc_endpoint_t {
-    /** Statically-allocated endpoint name; used for debugging */
     gchar *name;
-    /* Endpoint status */
     ipc_endpoint_status_t status;
-    /** Channel for IPC with web process */
-    GIOChannel *channel;
-    /** Queued data for when channel is not yet open */
+    GObject *target; /* WebView, WebPage, or WebExtension; borrowed */
     GQueue *queue;
-    /** Incoming message bookkeeping data */
-    ipc_recv_state_t recv_state;
-    /** Refcount: number of webviews + number of unsent messages */
     gint refcount;
-    /** Whether the endpoint creation signal has been emitted */
     gboolean creation_notified;
+    guint64 generation;
+    guint64 next_request;
+    guint64 received_request;
+    gpointer owner; /* UI-owned widget; never supplied by the renderer */
+    gint64 log_window;
+    guint log_count;
+    gboolean confirming;
 } ipc_endpoint_t;
 
+void ipc_endpoint_bind(ipc_endpoint_t *, GObject *, gpointer);
+void ipc_endpoint_activate(ipc_endpoint_t *);
+gboolean ipc_receive(ipc_endpoint_t *, gpointer);
+void ipc_send_variant(ipc_endpoint_t *, ipc_type_t, GVariant *);
+void ipc_send_lua_trusted(ipc_endpoint_t *, lua_State *, gint, gint);
+void ipc_endpoint_invalidate(ipc_endpoint_t *);
+
 ipc_endpoint_t *ipc_endpoint_new(const gchar *name);
-void ipc_endpoint_connect_to_socket(ipc_endpoint_t *ipc, int sock);
-ipc_endpoint_t * ipc_endpoint_replace(ipc_endpoint_t *orig, ipc_endpoint_t *new);
 void ipc_endpoint_disconnect(ipc_endpoint_t *ipc);
 
 WARN_UNUSED gboolean ipc_endpoint_incref(ipc_endpoint_t *ipc);
 void ipc_endpoint_decref(ipc_endpoint_t *ipc);
-
-const GPtrArray *ipc_endpoints_get(void);
 
 void ipc_send_lua(ipc_endpoint_t *ipc, ipc_type_t type, lua_State *L, gint start, gint end);
 void ipc_send(ipc_endpoint_t *ipc, const ipc_header_t *header, const void *data);
@@ -141,7 +130,7 @@ void ipc_send(ipc_endpoint_t *ipc, const ipc_header_t *header, const void *data)
 void \
 ipc_recv_##type(ipc_endpoint_t *ipc, const gpointer UNUSED(msg), guint UNUSED(length)) \
 { \
-    fatal("process '%s': should never receive message of type %s", ipc->name, #type); \
+    warn("process '%s': should never receive message of type %s", ipc->name, #type); \
 } \
 
 #endif

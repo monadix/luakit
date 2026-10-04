@@ -28,29 +28,42 @@ gint
 ipc_channel_send(lua_State *L)
 {
     ipc_channel_t *ipc_channel = luaH_check_ipc_channel(L, 1);
-    luaL_checkstring(L, 2);
+    page_t *page = luaH_check_page(L, 2);
+    luaL_checkstring(L, 3);
+    ipc_endpoint_t *ipc = web_page_get_endpoint(page->page);
+    lua_remove(L, 2);
     lua_pushstring(L, ipc_channel->name);
-    ipc_send_lua(extension.ipc, IPC_TYPE_lua_ipc, L, 2, lua_gettop(L));
+    ipc_send_lua(ipc, IPC_TYPE_lua_ipc, L, 2, lua_gettop(L));
     return 0;
 }
 
-void
-ipc_channel_recv(lua_State *L, const gchar *arg, guint arglen)
+static void
+channel_recv(lua_State *L, const gchar *arg, guint arglen, gboolean trusted)
 {
     gint top = lua_gettop(L);
-    int n = lua_deserialize_range(L, (guint8*)arg, arglen);
+    int n = trusted ? lua_deserialize_trusted_range(L, (guint8*)arg, arglen) :
+        lua_deserialize_range(L, (guint8*)arg, arglen);
+    if (n < 3 || lua_type(L, top + 1) != LUA_TSTRING ||
+        lua_type(L, top + n - 1) != LUA_TSTRING || lua_type(L, top + n) != LUA_TNUMBER) { lua_settop(L, top); return; }
 
     /* Remove signal name, module_name and page_id from the stack */
-    const char *signame = lua_tostring(L, -n);
+    char *signame = g_strdup(lua_tostring(L, -n));
     lua_remove(L, -n);
-    const char *module_name = lua_tostring(L, -2);
+    char *module_name = g_strdup(lua_tostring(L, -2));
     guint64 page_id = lua_tointeger(L, -1);
     lua_pop(L, 2);
     n -= 3;
 
+    if (trusted && !(
+        (!strcmp(module_name, "select_wm") && !strcmp(signame, "set_label_maker")) ||
+        (!strcmp(module_name, "follow_wm") && !strcmp(signame, "enter")))) {
+        goto done;
+    }
+
     /* Prepend the page object, or nil */
     if (page_id) {
         WebKitWebPage *web_page = webkit_web_extension_get_page(extension.ext, page_id);
+        if (!web_page) goto done;
         luaH_page_from_web_page(L, web_page);
     } else
         lua_pushnil(L);
@@ -69,7 +82,22 @@ ipc_channel_recv(lua_State *L, const gchar *arg, guint arglen)
         lua_insert(L, -n-1);
         luaH_object_emit_signal(L, -n-1, signame, n, 0);
     }
+done:
+    g_free(signame);
+    g_free(module_name);
     lua_settop(L, top);
+}
+
+void
+ipc_channel_recv(lua_State *L, const gchar *arg, guint length)
+{
+    channel_recv(L, arg, length, FALSE);
+}
+
+void
+ipc_channel_recv_trusted(lua_State *L, const gchar *arg, guint length)
+{
+    channel_recv(L, arg, length, TRUE);
 }
 
 // vim: ft=c:et:sw=4:ts=8:sts=4:tw=80

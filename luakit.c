@@ -34,7 +34,7 @@
 #include <unistd.h>
 #include <webkit2/webkit2.h>
 
-#if !WEBKIT_CHECK_VERSION(2,16,0)
+#if !WEBKIT_CHECK_VERSION(2,28,0)
 #error Your version of WebKit is outdated!
 #endif
 

@@ -88,8 +88,8 @@ log_group_from_fct(const char *fct)
         }
 
     int len = strlen(fct);
-    gboolean core = !strcmp(&fct[len-2], ".c") || !strcmp(&fct[len-2], ".h"),
-             lua = !strcmp(&fct[len-4], ".lua") || !strncmp(fct, "[string \"", 9);
+    gboolean core = len >= 2 && (!strcmp(&fct[len-2], ".c") || !strcmp(&fct[len-2], ".h")),
+             lua = (len >= 4 && !strcmp(&fct[len-4], ".lua")) || !strncmp(fct, "[string \"", 9);
 
     if (core) /* Strip .c or .lua off the end */
         return g_strdup_printf("core/%.*s", len-2, fct);
@@ -252,14 +252,18 @@ void
 ipc_recv_log(ipc_endpoint_t *UNUSED(ipc), const guint8 *lua_msg, guint length)
 {
     lua_State *L = common.L;
+    int top = lua_gettop(L);
     gint n = lua_deserialize_range(L, lua_msg, length);
-    g_assert_cmpint(n, ==, 3);
-
-    log_level_t lvl = lua_tointeger(L, -3);
-    const gchar *fct = lua_tostring(L, -2);
-    const gchar *msg = lua_tostring(L, -1);
-    _log(lvl, fct, "%s", msg);
-    lua_pop(L, 3);
+    if (n == 3 && lua_type(L, -3) == LUA_TNUMBER &&
+        lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) == LUA_TSTRING) {
+        double level = lua_tonumber(L, -3);
+        if (level >= LOG_LEVEL_fatal && level <= LOG_LEVEL_debug && level == (int)level &&
+            lua_objlen(L, -2) <= 256 && lua_objlen(L, -1) <= 8192) {
+            log_level_t lvl = MAX((int)level, LOG_LEVEL_error);
+            _log(lvl, lua_tostring(L, -2), "%s", lua_tostring(L, -1));
+        }
+    }
+    lua_settop(L, top);
 }
 
 void

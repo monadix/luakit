@@ -77,6 +77,7 @@ ipc_channel_class_setup(lua_State *L)
     {
         LUA_OBJECT_META(ipc_channel)
         { "emit_signal", ipc_channel_send },
+        { "add_web_signal", ipc_channel_add_web_signal },
         { "__gc", luaH_ipc_channel_gc },
         { NULL, NULL }
     };
@@ -90,5 +91,13 @@ ipc_channel_class_setup(lua_State *L)
     lua_newtable(L);
     lua_rawset(L, LUA_REGISTRYINDEX);
 }
+
+#ifdef LUAKIT_WEB_EXTENSION
+gint
+ipc_channel_add_web_signal(lua_State *L)
+{
+    return luaL_error(L, "broker handlers are UI-only");
+}
+#endif
 
 // vim: ft=c:et:sw=4:ts=8:sts=4:tw=80

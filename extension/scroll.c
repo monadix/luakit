@@ -26,16 +26,12 @@
 static void
 send_scroll_msg(gint h, gint v, WebKitWebPage *web_page, ipc_scroll_subtype_t subtype)
 {
-    const ipc_scroll_t data = {
-        .h = h, .v = v,.page_id = webkit_web_page_get_id(web_page), .subtype = subtype
-    };
-
-    ipc_header_t header = {
-        .type = IPC_TYPE_scroll,
-        .length = sizeof(data)
-    };
-
-    ipc_send(extension.ipc, &header, &data);
+    lua_State *L = common.L;
+    lua_pushinteger(L, MAX(h, 0));
+    lua_pushinteger(L, MAX(v, 0));
+    lua_pushinteger(L, subtype);
+    ipc_send_lua(web_page_get_endpoint(web_page), IPC_TYPE_scroll, L, -3, -1);
+    lua_pop(L, 3);
 }
 
 static void

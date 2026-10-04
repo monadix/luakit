@@ -21,11 +21,12 @@
 
 #include "common/ipc.h"
 
-int web_extension_connect(const gchar *socket_path);
-void emit_pending_page_creation_ipc(void);
+void web_extension_connect(void);
+struct _WebKitWebPage;
+ipc_endpoint_t *web_page_get_endpoint(struct _WebKitWebPage *);
 
-void ipc_recv_lua_require_module(ipc_endpoint_t *from, const ipc_lua_require_module_t *msg, guint length);
-void ipc_recv_lua_ipc(ipc_endpoint_t *from, const ipc_lua_ipc_t *msg, guint length);
+void ipc_recv_lua_require_module(ipc_endpoint_t *from, const void *msg, guint length);
+void ipc_recv_lua_ipc(ipc_endpoint_t *from, const void *msg, guint length);
 
 #endif
 

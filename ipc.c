@@ -18,205 +18,110 @@
 
 #include "globalconf.h"
 #include "ipc.h"
-
-#include <assert.h>
-#include <webkit2/webkit2.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/un.h>
-#include <glib.h>
-#include <glib/gstdio.h>
-#include <errno.h>
-#include <stdlib.h>
-
 #include "clib/web_module.h"
-#include "clib/luakit.h"
 #include "clib/widget.h"
 #include "common/luaserialize.h"
 #include "common/clib/ipc.h"
 #include "web_context.h"
 #include "widgets/webview.h"
 
-void webview_scroll_recv(void *d, const ipc_scroll_t *ipc);
-void run_javascript_finished(const guint8 *msg, guint length);
-
-static char *socket_path;
-GMutex socket_path_lock;
-GCond socket_path_cond;
+void webview_scroll_recv(void *, const ipc_scroll_t *);
+void run_javascript_finished(ipc_endpoint_t *, const guint8 *, guint);
 
 IPC_NO_HANDLER(lua_require_module)
-IPC_NO_HANDLER(web_extension_loaded)
+IPC_NO_HANDLER(lua_trusted)
+IPC_NO_HANDLER(extension_init)
 IPC_NO_HANDLER(crash)
 
 void
-ipc_recv_extension_init(ipc_endpoint_t *ipc, const gpointer UNUSED(msg), guint UNUSED(length))
+ipc_recv_lua_ipc(ipc_endpoint_t *ipc, const ipc_lua_ipc_t *msg, guint length)
 {
+    ipc_channel_recv_web(common.L, ipc, msg->arg, length);
+}
+
+void
+ipc_recv_scroll(ipc_endpoint_t *ipc, const guint8 *msg, guint length)
+{
+    lua_State *L = common.L;
+    int top = lua_gettop(L);
+    int n = lua_deserialize_range(L, msg, length);
+    if (ipc->owner && n == 3 && lua_type(L, -3) == LUA_TNUMBER &&
+        lua_type(L, -2) == LUA_TNUMBER && lua_type(L, -1) == LUA_TNUMBER) {
+        double h = lua_tonumber(L, -3), v = lua_tonumber(L, -2), subtype = lua_tonumber(L, -1);
+        if (h >= 0 && h <= G_MAXINT && v >= 0 && v <= G_MAXINT &&
+            h == (gint)h && v == (gint)v && subtype >= 0 && subtype <= 2 && subtype == (gint)subtype) {
+            widget_t *w = ipc->owner;
+            ipc_scroll_t scroll = { .h = h, .v = v, .subtype = subtype,
+                .page_id = webkit_web_view_get_page_id(WEBKIT_WEB_VIEW(w->widget)) };
+            webview_scroll_recv(w, &scroll);
+        }
+    }
+    lua_settop(L, top);
+}
+
+void
+ipc_recv_eval_js(ipc_endpoint_t *ipc, const guint8 *msg, guint length)
+{
+    run_javascript_finished(ipc, msg, length);
+}
+
+void
+ipc_recv_page_created(ipc_endpoint_t *ipc, const void *UNUSED(msg), guint length)
+{
+    if (!ipc->owner || length != 0) return;
+    /* Initialize the page's generation before releasing queued UI operations. */
+    ipc->status = IPC_ENDPOINT_CONNECTED;
+    /* Include requests made while this renderer was starting. require caches
+     * each module, so already-loaded modules do not duplicate handlers. */
     web_module_load_modules_on_endpoint(ipc);
-
-    /* Notify web extension that pending signals can be released */
-    ipc_header_t header = { .type = IPC_TYPE_extension_init, .length = 0 };
+    ipc_header_t header = { .type = IPC_TYPE_extension_init };
     ipc_send(ipc, &header, NULL);
+    webview_connect_to_endpoint(ipc->owner, ipc);
+}
+
+static gboolean
+view_message_cb(WebKitWebView *UNUSED(view), WebKitUserMessage *message, widget_t *w)
+{
+    ipc_endpoint_t *ipc = webview_get_endpoint(w);
+    if (!ipc_endpoint_incref(ipc)) return TRUE;
+    gboolean handled = ipc_receive(ipc, message);
+    ipc_endpoint_decref(ipc);
+    return handled;
 }
 
 void
-ipc_recv_lua_ipc(ipc_endpoint_t *UNUSED(ipc), const ipc_lua_ipc_t *msg, guint length)
+ipc_bind_webview(widget_t *w)
 {
-    ipc_channel_recv(common.L, msg->arg, length);
+    ipc_endpoint_bind(webview_get_endpoint(w), G_OBJECT(w->widget), w);
+    g_signal_connect(w->widget, "user-message-received", G_CALLBACK(view_message_cb), w);
 }
 
-void
-ipc_recv_scroll(ipc_endpoint_t *UNUSED(ipc), ipc_scroll_t *msg, guint UNUSED(length))
+static gboolean
+context_message_cb(WebKitWebContext *UNUSED(context), WebKitUserMessage *message, ipc_endpoint_t *ipc)
 {
-    g_ptr_array_foreach(globalconf.webviews, (GFunc)webview_scroll_recv, msg);
-}
-
-void
-ipc_recv_eval_js(ipc_endpoint_t *UNUSED(ipc), const guint8 *msg, guint length)
-{
-    run_javascript_finished(msg, length);
-}
-
-void
-ipc_recv_page_created(ipc_endpoint_t *ipc, const ipc_page_created_t *msg, guint UNUSED(length))
-{
-    widget_t *w = webview_get_by_id(msg->page_id);
-
-    /* Page may already have been closed */
-    if (!w) return;
-
-    webview_connect_to_endpoint(w, ipc);
-    webview_set_web_process_id(w, msg->pid);
-}
-
-static gchar *
-build_socket_path(void)
-{
-    char suffix[11] = {0};
-retry:
-    for (unsigned i=0; i < sizeof(suffix)-1; i++) {
-        int c = g_random_int_range(0, 10+26+26), base = '0';
-        if (c >= 10) { base = 'A'; c -= 10; }
-        if (c >= 26) { base = 'a'; c -= 26; }
-        suffix[i] = base + c;
-    }
-    gchar *socket_name = g_strdup_printf("luakit-ipc-%d-%s", getpid(), suffix);
-    gchar *socket_path = g_build_filename(g_get_tmp_dir(), socket_name, NULL);
-    g_free(socket_name);
-
-    if (g_file_test(socket_path, G_FILE_TEST_EXISTS)) {
-        g_free(socket_path);
-        goto retry;
-    }
-    return socket_path;
-}
-
-static gpointer
-web_extension_connect_thread(gpointer UNUSED(data))
-{
-    gchar *path = build_socket_path();
-
-    int sock;
-    if ((sock = socket(AF_UNIX, SOCK_STREAM, 0)) == -1)
-        fatal("Error calling socket(): %s", strerror(errno));
-
-    struct sockaddr_un local;
-    memset(&local, 0, sizeof(local));
-    local.sun_family = AF_UNIX;
-
-    if (strlen(path) >= sizeof(local.sun_path))
-        fatal("Socket path too long (%zu >= %zu): %s",
-              strlen(path), sizeof(local.sun_path), path);
-    g_strlcpy(local.sun_path, path, sizeof(local.sun_path));
-
-    int len = offsetof(struct sockaddr_un, sun_path) + strlen(local.sun_path);
-
-    /* Remove any pre-existing socket, before opening */
-    unlink(local.sun_path);
-
-    if (bind(sock, (struct sockaddr *)&local, len) == -1)
-        fatal("Error calling bind() on socket %s: %s", path, strerror(errno));
-
-    if (listen(sock, 5) == -1)
-        fatal("Error calling listen() on socket %s: %s", path, strerror(errno));
-
-    g_mutex_lock(&socket_path_lock);
-    socket_path = path;
-    g_cond_signal(&socket_path_cond);
-    g_mutex_unlock(&socket_path_lock);
-
-    while (TRUE) {
-        debug("Waiting for a connection...");
-
-        int web_socket;
-        struct sockaddr_un remote;
-        socklen_t size = sizeof(remote);
-        if ((web_socket = accept(sock, (struct sockaddr *)&remote, &size)) == -1)
-            fatal("Error calling accept(): %s", strerror(errno));
-
-        ipc_endpoint_t *ipc = ipc_endpoint_new("UI");
-        ipc_endpoint_connect_to_socket(ipc, web_socket);
-    }
-
-    return NULL;
+    return ipc_receive(ipc, message);
 }
 
 static void
 initialize_web_extensions_cb(WebKitWebContext *context, gpointer UNUSED(data))
 {
-    char *dirs[] = { g_get_current_dir(), LUAKIT_LIB_PATH }, *dir = NULL;
-
-    for (unsigned i = 0; !dir && i < LENGTH(dirs); ++i) {
-        char *extension_file = g_build_filename(dirs[i],  "luakit.so", NULL);
-        verbose("checking for luakit extension at '%s'", dirs[i]);
-        if (!access(extension_file, R_OK))
-            dir = dirs[i];
-        g_free(extension_file);
-    }
-
-    if (dir)
-        verbose("found luakit extension at '%s'", dir);
-    else
-        fatal("cannot find luakit extension 'luakit.so'");
-
-    const char *path;
-    g_mutex_lock (&socket_path_lock);
-    while (!socket_path)
-        g_cond_wait (&socket_path_cond, &socket_path_lock);
-    path = socket_path;
-    g_mutex_unlock (&socket_path_lock);
-
-    lua_getglobal(common.L, "package");
-    lua_getfield(common.L, -1, "path");
-    const char *package_path = lua_tostring(common.L, -1);
-    lua_getfield(common.L, -2, "cpath");
-    const char *package_cpath = lua_tostring(common.L, -1);
-    lua_pop(common.L, 3);
-
-    GVariant *payload = g_variant_new("(sss)", path, package_path, package_cpath);
+    lua_State *L = common.L;
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "path");
+    lua_getfield(L, -2, "cpath");
+    GVariant *modules = web_module_get_names();
+    GVariant *payload = g_variant_new("(ss@as)", lua_tostring(L, -2), lua_tostring(L, -1), modules);
+    lua_pop(L, 3);
     webkit_web_context_set_web_extensions_initialization_user_data(context, payload);
-    webkit_web_context_set_web_extensions_directory(context, dir);
-
-    g_free(dirs[0]);
-}
-
-void
-ipc_remove_socket_file(void)
-{
-    g_mutex_lock(&socket_path_lock);
-    g_unlink(socket_path);
-    g_free(socket_path);
-    socket_path = NULL;
-    g_mutex_unlock(&socket_path_lock);
 }
 
 void
 ipc_init(void)
 {
-    /* Start web extension connection accept thread */
-    g_thread_new("accept_thread", web_extension_connect_thread, NULL);
-    g_signal_connect(web_context_get(), "initialize-web-extensions",
-            G_CALLBACK (initialize_web_extensions_cb), NULL);
-    atexit(ipc_remove_socket_file);
+    ipc_endpoint_t *context = ipc_endpoint_new("context");
+    context->status = IPC_ENDPOINT_CONNECTED;
+    g_signal_connect(web_context_get(), "user-message-received", G_CALLBACK(context_message_cb), context);
+    g_signal_connect(web_context_get(), "initialize-web-extensions", G_CALLBACK(initialize_web_extensions_cb), NULL);
 }
 
 // vim: ft=c:et:sw=4:ts=8:sts=4:tw=80

@@ -32,9 +32,10 @@
 
 static lua_class_t page_class;
 
+
 LUA_OBJECT_FUNCS(page_class, page_t, page);
 
-static page_t*
+page_t*
 luaH_check_page(lua_State *L, gint udx)
 {
     page_t *page = luaH_checkudata(L, udx, &page_class);
