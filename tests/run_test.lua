@@ -122,6 +122,9 @@ local function spawn_luakit_instance(config, ...)
         XDG_CONFIG_HOME = dir .. "/config",
         XDG_RUNTIME_DIR = dir .. "/runtime",
         XDG_CONFIG_DIRS = "",
+        PATH = util.getenv("PATH"),
+        LUA_PATH = util.getenv("LUA_PATH"),
+        LUA_CPATH = util.getenv("LUA_CPATH"),
         DISPLAY = xvfb_display
     }
 
@@ -138,7 +141,7 @@ local function spawn_luakit_instance(config, ...)
     -- Build env prefix
     local cmd = "env -i - "
     for k, v in pairs(env) do
-        cmd = cmd .. k .."=" .. v .. " "
+        cmd = cmd .. k .. "='" .. v:gsub("'", "'\\''") .. "' "
     end
 
     cmd = cmd .. "./luakit -U --log=error -c " .. config .. " " .. table.concat({...}, " ")  .. " 2>&1"

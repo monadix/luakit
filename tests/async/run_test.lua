@@ -4,6 +4,10 @@
 -- @copyright 2017 Aidan Holm <aidanholm@gmail.com>
 
 -- Adjust paths to work when running with DEVELOPMENT_PATHS=0
+local lfs = require("lfs")
+for _, dir in ipairs({ "tests", "lib", "config", "resources" }) do
+    luakit.add_path_to_sandbox(lfs.currentdir() .. "/" .. dir)
+end
 dofile("tests/async/wrangle_paths.lua")
 require_web_module("tests/async/wrangle_paths")
 

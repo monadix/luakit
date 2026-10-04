@@ -926,6 +926,26 @@ luaH_class_newindex_miss_property(lua_State *L, lua_object_t* UNUSED(obj))
 }
 
 static gint
+luaH_luakit_add_path_to_sandbox(lua_State *L)
+{
+    size_t len;
+    const char *path = luaL_checklstring(L, 1, &len);
+    if (strlen(path) != len) return luaL_error(L, "sandbox path contains NUL");
+    gboolean read_only = TRUE;
+    if (!lua_isnoneornil(L, 2)) {
+        luaL_checktype(L, 2, LUA_TBOOLEAN);
+        read_only = lua_toboolean(L, 2);
+    }
+    char *reason = NULL;
+    if (!web_context_add_path_to_sandbox(path, read_only, &reason)) {
+        lua_pushstring(L, reason);
+        g_free(reason);
+        return lua_error(L);
+    }
+    return 0;
+}
+
+static gint
 luaH_luakit_confirm(lua_State *L)
 {
     widget_t *w = luaH_checkwebview(L, 1);
@@ -977,6 +997,7 @@ luakit_lib_setup(lua_State *L)
         { "spawn_sync",             luaH_luakit_spawn_sync },
         { "register_scheme",        luaH_luakit_register_scheme },
         { "allow_certificate",      luaH_luakit_allow_certificate },
+        { "add_path_to_sandbox",     luaH_luakit_add_path_to_sandbox },
         { "confirm",                luaH_luakit_confirm },
         { "wch_lower",              luaH_luakit_wch_lower },
         { "wch_upper",              luaH_luakit_wch_upper },

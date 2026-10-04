@@ -231,6 +231,15 @@
 --- Clear the favicon cache database.
 -- @function clear_favicon_database
 
+--- Grant a specific path to WebKit's sandbox before creating any WebView.
+-- UI-only. The path must exist and be absolute. Root, home, temporary-directory
+-- roots, ancestors of Luakit data/cache roots, and system pseudo-filesystems are
+-- prohibited. Symlink targets are granted as well. Invalid or late calls raise
+-- Lua errors. The WebKit sandbox API is implemented on Linux only.
+-- @function add_path_to_sandbox
+-- @tparam string path The absolute file or directory path.
+-- @tparam[opt=true] boolean read_only False explicitly permits writes.
+
 --- Confirm a privileged renderer request using trusted GTK UI.
 -- UI-only. Navigation, view destruction or process replacement expires approval.
 -- @function confirm

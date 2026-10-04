@@ -23,6 +23,7 @@
 
 #include <webkit2/webkit2.h>
 
+gboolean web_context_add_path_to_sandbox(const char *, gboolean, gchar **);
 void web_context_init(void);
 void web_context_init_finish(void);
 WebKitWebContext *web_context_get(void);

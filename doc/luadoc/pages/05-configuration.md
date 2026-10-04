@@ -67,3 +67,28 @@ command:
 
     :lua w:notify(luakit.cache_dir)
 
+
+## WebProcess filesystem access
+
+Luakit enables WebKit's sandbox before creating any WebView. On Linux,
+WebProcesses receive read-only access to the selected extension directory,
+installed `lib` and `resources`, the active user configuration directory
+(including a named profile), each system configuration directory's `luakit`
+child, and the resolved native `lfs` module file. Development builds also grant
+checkout `lib`, `config` and `resources`. Optional absent directories are skipped;
+missing required dependencies fail startup without disabling the sandbox.
+
+Additional module search paths do not automatically grant filesystem access.
+Register a specific existing absolute path in `rc.lua` before constructing the
+first WebView:
+
+    luakit.add_path_to_sandbox("/opt/my-web-modules") -- read-only
+    luakit.add_path_to_sandbox("/var/lib/my-web-module", false) -- explicit writes
+
+Home, data/cache directories and temporary-directory roots are not automatic
+grants. Root, broad ancestor paths and pseudo-filesystems cannot be registered.
+Symlinked installations retain access through both the selected and resolved
+paths. A write grant lets a compromised WebProcess modify that path.
+
+WebKit's sandbox-enablement API is a no-op outside Linux. See the
+[WebKitGTK sandbox documentation](https://webkitgtk.org/reference/webkit2gtk/2.42.1/method.WebContext.set_sandbox_enabled.html).
