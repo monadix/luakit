@@ -23,7 +23,7 @@ local evaluators = {
         -- Handle <a target=_blank> indirectly; WebKit prevents opening a new
         -- window if not initiated by the user directly
         if tag == "A" and element.attr.target == "_blank" then
-            ui:emit_signal("click_a_target_blank", page.id, element.href)
+            ui:emit_signal(page, "click_a_target_blank", element.href)
             return
         end
         -- Find the element directly in the centre of the link
@@ -78,7 +78,7 @@ local function follow_hint(page, mode, hint)
     local ret = evaluator(hint.elem, page)
     hint.overlay_elem.attr.style = overlay_style
 
-    ui:emit_signal("follow_func", page.id, ret)
+    ui:emit_signal(page, "follow_func", ret)
 end
 
 local function follow(page, all)
@@ -116,12 +116,12 @@ ui:add_signal("enter", function(_, page, mode, ignore_case)
     select.enter(page, mode.selector, mode.stylesheet, ignore_case)
 
     local num_visible_hints = #(select.hints(page))
-    ui:emit_signal("matches", page.id, num_visible_hints)
+    ui:emit_signal(page, "matches", num_visible_hints)
 end)
 
 ui:add_signal("changed", function(_, page, hint_pat, text_pat, text)
     local _, num_visible_hints = select.changed(page, hint_pat, text_pat, text)
-    ui:emit_signal("matches", page.id, num_visible_hints)
+    ui:emit_signal(page, "matches", num_visible_hints)
     if num_visible_hints == 1 and text ~= "" then
         follow(page, false)
     end

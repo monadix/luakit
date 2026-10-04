@@ -202,8 +202,7 @@ local mode_section_template = [==[
 local mode_bind_template = [==[
     <li class="bind bind_type_{type}">
         <div class="link-box">
-            <a href="#" class="linedefined" data-filename="{filename}"
-            data-line="{linedefined}">{filename}:{linedefined}</a>
+            <a href="#" class="linedefined" data-source-id="{source_id}">{filename}:{linedefined}</a>
         </div>
         <hr class="clear" />
         <div class="key">{key}</div>
@@ -219,8 +218,7 @@ local main_js = [=[
 document.addEventListener('click', event => {
     if (event.target.matches('.linedefined')) {
         event.preventDefault()
-        let { filename, line } = event.target.dataset
-        open_editor(filename, line)
+        open_editor(Number(event.target.dataset.sourceId))
     } else if (event.target.matches('.bind, .bind *')) {
         let $el = event.target
         while ($el && !$el.classList.contains('bind')) $el = $el.parentNode
@@ -284,13 +282,20 @@ local help_get_modes = function ()
     return ret
 end
 
-chrome.add("binds", function ()
+local source_locations = setmetatable({}, { __mode = "k" })
+
+chrome.add("binds", function (view)
+    local locations = {}
+    source_locations[view] = locations
     local sections = {}
     local modes = help_get_modes()
 
     for _, mode in ipairs(modes) do
         local binds = {}
         for _, bind in ipairs(mode.binds) do
+            locations[#locations + 1] = { file = bind.filename, line = bind.linedefined }
+            bind.source_id = #locations
+            bind.filename = escape(bind.filename)
             bind.key = escape(bind.key)
             bind.desc = bind.desc or ""
             binds[#binds+1] = string.gsub(mode_bind_template, "{(%w+)}", bind)
@@ -314,8 +319,12 @@ chrome.add("binds", function ()
     local html = string.gsub(html_template, "{(%w+)}", html_subs)
     return html
 end, nil, {
-    open_editor = function(_, ...) return editor.edit(...) end,
-})
+    open_editor = function(view, id)
+        local location = source_locations[view] and source_locations[view][id]
+        if not location then return end
+        editor.edit(location.file, location.line, nil, view)
+    end,
+}, { open_editor = { "id" } })
 
 add_cmds({
     { ":binds", "Open <luakit://binds/> in a new tab.",

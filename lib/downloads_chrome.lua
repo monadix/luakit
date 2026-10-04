@@ -10,6 +10,7 @@
 -- Grab the luakit environment we need
 local downloads = require("downloads")
 local chrome = require("chrome")
+local broker = require("lousy.broker")
 local modes = require("modes")
 local add_binds, add_cmds = modes.add_binds, modes.add_cmds
 local webview = require("webview")
@@ -242,6 +243,7 @@ local export_funcs = {
     download_show = function (view, id)
         local d = downloads.get(id)
         local dirname = string.gsub(d.destination, "(.*/)(.*)", "%1")
+        if not luakit.confirm(view, "Open download directory", dirname) then return end
         if downloads.emit_signal("open-file", dirname, "inode/directory") ~= true then
             local w = webview.window(view)
             w:error("Couldn't show download directory (no inode/directory handler)")
@@ -250,9 +252,13 @@ local export_funcs = {
 
     download_cancel  = function (_, id) return downloads.cancel(id) end,
     download_restart = function (_, id) return downloads.restart(id) end,
-    download_open    = function (_, id) return downloads.open(id) end,
+    download_open    = function (view, id)
+        local d = downloads.get(id)
+        if d.status ~= "finished" then return end
+        return downloads.do_open(d, webview.window(view))
+    end,
     download_remove  = function (_, id) return downloads.remove(id) end,
-    downloads_clear  = function (_, id) return downloads.clear(id) end,
+    downloads_clear  = function (_) return downloads.clear() end,
 }
 
 downloads.add_signal("status-tick", function (running)
@@ -284,7 +290,32 @@ chrome.add("downloads", function ()
     }
     local html = string.gsub(html_template, "{(%w+)}", html_subs)
     return html
-end, nil, export_funcs)
+end, nil, export_funcs, (function ()
+    local function download_id(id)
+        return (type(id) == "string" and #id <= 128 or broker.id(id))
+            and downloads.to_download(id) ~= nil
+    end
+    local function filter(value)
+        if value == nil then return true end
+        if type(value) ~= "table" or #value > 16 then return false end
+        local count = 0
+        for k, v in pairs(value) do
+            if not broker.id(k) or k > #value or not default_filter[v] then return false end
+            count = count + 1
+        end
+        return count == #value
+    end
+    return {
+        download_get = { download_id, filter },
+        downloads_get_all = { filter },
+        download_show = { download_id },
+        download_cancel = { download_id },
+        download_restart = { download_id },
+        download_open = { download_id },
+        download_remove = { download_id },
+        downloads_clear = {},
+    }
+end)())
 
 --- URI of the downloads chrome page.
 -- @type string

@@ -22,6 +22,7 @@
 #include "common/clib/luakit.h"
 #include "clib/widget.h"
 #include "common/luaserialize.h"
+#include "widgets/webview.h"
 #include "common/luayield.h"
 #include "common/ipc.h"
 #include "common/resource.h"
@@ -924,6 +925,38 @@ luaH_class_newindex_miss_property(lua_State *L, lua_object_t* UNUSED(obj))
     return 0;
 }
 
+static gint
+luaH_luakit_confirm(lua_State *L)
+{
+    widget_t *w = luaH_checkwebview(L, 1);
+    size_t op_len, target_len;
+    const char *operation = luaL_checklstring(L, 2, &op_len);
+    const char *target = luaL_checklstring(L, 3, &target_len);
+    if (op_len > 128 || target_len > 8192 || strlen(operation) != op_len || strlen(target) != target_len)
+        return luaL_error(L, "invalid confirmation target");
+    ipc_endpoint_t *ipc = webview_get_endpoint(w);
+    if (ipc->confirming || !ipc_endpoint_incref(ipc)) { lua_pushboolean(L, FALSE); return 1; }
+    ipc->confirming = TRUE;
+    guint64 generation = ipc->generation;
+    GtkWidget *toplevel = gtk_widget_get_toplevel(w->widget);
+    GtkWidget *dialog = gtk_message_dialog_new(GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : NULL,
+            GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_QUESTION,
+            GTK_BUTTONS_NONE, "%s\n\n%s", operation, target);
+    g_object_ref_sink(dialog);
+    gtk_window_set_title(GTK_WINDOW(dialog), "Luakit confirmation");
+    gtk_dialog_add_buttons(GTK_DIALOG(dialog), "Cancel", GTK_RESPONSE_CANCEL,
+            "Allow", GTK_RESPONSE_ACCEPT, NULL);
+    gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_CANCEL);
+    int response = gtk_dialog_run(GTK_DIALOG(dialog));
+    gboolean approved = response == GTK_RESPONSE_ACCEPT && ipc->owner && ipc->generation == generation;
+    gtk_widget_destroy(dialog);
+    g_object_unref(dialog);
+    ipc->confirming = FALSE;
+    ipc_endpoint_decref(ipc);
+    lua_pushboolean(L, approved);
+    return 1;
+}
+
 /** Setup luakit module.
  *
  * \param L The Lua VM state.
@@ -944,6 +977,7 @@ luakit_lib_setup(lua_State *L)
         { "spawn_sync",             luaH_luakit_spawn_sync },
         { "register_scheme",        luaH_luakit_register_scheme },
         { "allow_certificate",      luaH_luakit_allow_certificate },
+        { "confirm",                luaH_luakit_confirm },
         { "wch_lower",              luaH_luakit_wch_lower },
         { "wch_upper",              luaH_luakit_wch_upper },
         { "clear_favicon_database", luaH_luakit_clear_favicon_database },

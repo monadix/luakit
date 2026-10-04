@@ -57,7 +57,6 @@
 -- @copyright 2012 Plaque FCC <Reslayer@ya.ru>
 
 local webview   = require("webview")
-local window    = require("window")
 local lousy     = require("lousy")
 local util      = lousy.util
 local lfs       = require("lfs")
@@ -477,17 +476,15 @@ webview.add_signal("init", function (view)
     end
     view:add_signal("switched-page", unblock)
 end)
-adblock_wm:add_signal("rules_updated", function (_, web_process_id)
-    for _, ww in pairs(window.bywidget) do
-        for _, v in pairs(ww.tabs.children) do
-            if v.web_process_id == web_process_id then
-                webview.modify_load_block(v, "adblock", false)
-            end
-        end
-    end
+adblock_wm:add_web_signal("rules_updated", require("lousy.broker").policy({}, function (_, view)
+    return require("lousy.broker").state(view).adblock_pending == true
+end), function (_, view)
+    require("lousy.broker").state(view).adblock_pending = nil
+    webview.modify_load_block(view, "adblock", false)
 end)
 
 luakit.add_signal("web-extension-created", function (view)
+    require("lousy.broker").state(view).adblock_pending = true
     new_web_extension_created = true
     adblock_wm:emit_signal(view, "update_rules", _M.rules)
     for name, list in pairs(_M.rules) do

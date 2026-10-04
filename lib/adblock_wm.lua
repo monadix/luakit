@@ -13,13 +13,13 @@ local enabled_rules = {}
 local page_whitelist = {}
 
 ui:add_signal("enable", function(_, _, e) enabled = e end)
-ui:add_signal("update_rules", function(_, _, r)
+ui:add_signal("update_rules", function(_, page, r)
     rules = r
-    ui:emit_signal("rules_updated", luakit.web_process_id)
+    if page then ui:emit_signal(page, "rules_updated") end
 end)
-ui:add_signal("update_page_whitelist", function(_, _, wl)
+ui:add_signal("update_page_whitelist", function(_, page, wl)
     page_whitelist = wl
-    ui:emit_signal("rules_updated", luakit.web_process_id)
+    if page then ui:emit_signal(page, "rules_updated") end
 end)
 ui:add_signal("list_set_enabled", function(_, _, list, enable)
     enabled_rules[list] = enable and rules[list] or nil

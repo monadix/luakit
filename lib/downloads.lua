@@ -117,7 +117,15 @@ end
 -- @tparam download d The download object.
 -- @tparam table w The current window table.
 function _M.do_open(d, w)
-    if _M.emit_signal("open-file", d.destination, d.mime_type, w) ~= true then
+    local data = dls[d]
+    if not data or d.status ~= "finished" then return end
+    w = w or window.bywidget[data.window]
+    local view = w and w.view
+    if not view then return end
+    local target, mime = d.destination, d.mime_type
+    if not luakit.confirm(view, "Open downloaded file", target) then return end
+    if dls[d] ~= data or d.status ~= "finished" or d.destination ~= target then return end
+    if _M.emit_signal("open-file", target, mime, w) ~= true then
         if w then
             w:error(string.format("Couldn't open: %q (%s)", d.destination,
                 d.mime_type))
@@ -188,6 +196,7 @@ function _M.add(uri, opts)
                 local data = {
                     created = luakit.time(),
                     id = next_download_id(),
+                    window = opts.window,
                 }
                 dls[ddd] = data
                 if not status_timer.started then status_timer:start() end

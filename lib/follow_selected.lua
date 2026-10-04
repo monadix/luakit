@@ -11,6 +11,8 @@
 -- @copyright 2009 israellevin
 
 local window = require("window")
+local webview = require("webview")
+local broker = require("lousy.broker")
 local modes = require("modes")
 local add_binds = modes.add_binds
 
@@ -18,37 +20,34 @@ local _M = {}
 
 local wm = require_web_module("follow_selected_wm")
 
-local function get_w_by_view_id(view_id)
-    for _, w in pairs(window.bywidget) do
-        if w.view.id == view_id then
-            return w
-        end
-    end
+local function request(w, action)
+    broker.state(w.view).selected = action
+    wm:emit_signal(w.view, "follow_selected", action)
 end
 
-wm:add_signal("navigate", function(_, uri, view_id)
-    get_w_by_view_id(view_id):navigate(uri)
-end)
-wm:add_signal("new_tab", function(_, uri, view_id)
-    get_w_by_view_id(view_id):new_tab(uri)
-end)
-wm:add_signal("new_window", function(_, uri)
-    window.new({uri})
-end)
-wm:add_signal("download", function(_, uri, view_id)
-    get_w_by_view_id(view_id):download(uri)
-end)
+for _, action in ipairs({ "navigate", "new_tab", "new_window", "download" }) do
+    wm:add_web_signal(action, broker.policy({ "uri" }, function (_, view)
+        return broker.state(view).selected == action and webview.window(view) ~= nil
+    end), function (_, view, uri)
+        broker.state(view).selected = nil
+        local w = webview.window(view)
+        if action == "new_window" then window.new({uri})
+        elseif action == "navigate" then w:navigate(uri)
+        elseif action == "new_tab" then w:new_tab(uri)
+        else w:download(uri) end
+    end)
+end
 
 -- Add binding to normal mode to follow selected link
 add_binds("normal", {
     { "<Return>", "Follow the selected link in the current tab.",
-        function (w) wm:emit_signal(w.view, "follow_selected", "navigate", w.view.id) end },
+        function (w) request(w, "navigate") end },
     { "<Control-Return>", "Follow the selected link in a new tab.",
-        function (w) wm:emit_signal(w.view, "follow_selected", "new_tab", w.view.id) end },
+        function (w) request(w, "new_tab") end },
     { "<Shift-Return>", "Follow the selected link in a new window.",
-        function (w) wm:emit_signal(w.view, "follow_selected", "new_window", w.view.id) end },
+        function (w) request(w, "new_window") end },
     { "<Mod1-Return>", "Download the selected link.",
-        function (w) wm:emit_signal(w.view, "follow_selected", "download", w.view.id) end },
+        function (w) request(w, "download") end },
 })
 
 return _M

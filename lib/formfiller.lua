@@ -81,7 +81,6 @@
 -- @copyright 2011 Mason Larobina <mason.larobina@gmail.com>
 
 local lousy = require("lousy")
-local window = require("window")
 local webview = require("webview")
 local editor = require("editor")
 local new_mode = require("modes").new_mode
@@ -92,6 +91,8 @@ local menu_binds = binds.menu_binds
 local _M = {}
 
 local formfiller_wm = require_web_module("formfiller_wm")
+local broker = require("lousy.broker")
+local next_operation = 0
 
 -- The Lua DSL file containing the formfiller rules
 local file = luakit.data_dir .. "/forms.lua"
@@ -144,9 +145,45 @@ local DSL = {
 
 local dsl_extensions = {}
 
-formfiller_wm:add_signal("dsl_extension_query", function (_, k, arg, view_id)
-    local reply = dsl_extensions[k](unpack(arg))
-    formfiller_wm:emit_signal(view_id,"dsl_extension_reply", reply, view_id)
+local function operations(view)
+    local state = broker.state(view)
+    state.forms = state.forms or {}
+    return state.forms
+end
+
+local function prepare(view, kind, specs)
+    local ops = operations(view)
+    local count = 0
+    for _ in pairs(ops) do count = count + 1 end
+    assert(count < 256, "too many pending form operations")
+    next_operation = next_operation + 1
+    local id = next_operation
+    local op = { kind = kind, specs = specs, calls = {} }
+    ops[id] = op
+    local function copy(value)
+        if type(value) ~= "table" then return value end
+        if value.sentinel then
+            local call_id = #op.calls + 1
+            op.calls[call_id] = { key = value.key, args = value.arg }
+            return { sentinel = true, call_id = call_id }
+        end
+        local result = {}
+        for k, v in pairs(value) do result[k] = copy(v) end
+        return result
+    end
+    return id, copy(specs)
+end
+
+formfiller_wm:add_web_signal("dsl_extension_query", broker.policy({ "id", "id" }, function (_, view, id, call_id)
+    local op = operations(view)[id]
+    return op ~= nil and op.calls[call_id] ~= nil
+end), function (_, view, id, call_id)
+    local call = operations(view)[id].calls[call_id]
+    if not call.done then
+        call.done = true
+        call.result = dsl_extensions[call.key](unpack(call.args))
+    end
+    formfiller_wm:emit_signal(view, "dsl_extension_reply", id, call_id, call.result)
 end)
 
 --- Extend the formfiller DSL with additional functions. This takes a table of
@@ -235,26 +272,79 @@ local function edit()
     editor.edit(file)
 end
 
-local function w_from_view_id(view_id)
-    assert(type(view_id) == "number", type(view_id))
-    for _, w in pairs(window.bywidget) do
-        if w.view.id == view_id then return w end
+local function pending_kind(kind)
+    return function (_, view, id)
+        local op = operations(view)[id]
+        return op ~= nil and (not kind or op.kind == kind) and webview.window(view) ~= nil
     end
 end
 
-formfiller_wm:add_signal("failed", function (_, view_id, msg)
-    local w = w_from_view_id(view_id)
-    w:error(msg)
+formfiller_wm:add_web_signal("failed", broker.policy({ "id", "string" }, pending_kind()), function (_, view, id, text)
+    operations(view)[id] = nil
+    local w = webview.window(view)
+    w:error(text)
     w:set_mode()
 end)
-formfiller_wm:add_signal("add", function (_, view_id, str)
-    local w = w_from_view_id(view_id)
-    w:set_mode()
-    local f = io.open(file, "a")
-    f:write(str)
+formfiller_wm:add_web_signal("finished", broker.policy({ "id" }, pending_kind("fill")), function (_, view, id)
+    operations(view)[id] = nil
+end)
+
+local form_attrs = { method = true, action = true, id = true, className = true, name = true }
+local input_attrs = { id = true, className = true, name = true, type = true, value = true, checked = true }
+local function attributes(value, allowed)
+    if type(value) ~= "table" then return false end
+    for k, v in pairs(value) do
+        if not allowed[k] then return false end
+        if k == "checked" then
+            if type(v) ~= "boolean" then return false end
+        elseif type(v) ~= "string" or #v > 8192 then return false end
+    end
+    return true
+end
+local function saved_form(data)
+    if type(data) ~= "table" or not attributes(data.attrs, form_attrs)
+        or type(data.inputs) ~= "table" or #data.inputs > 1000 then return false end
+    for k in pairs(data) do if k ~= "attrs" and k ~= "inputs" then return false end end
+    local count = 0
+    for k, input in pairs(data.inputs) do
+        if not broker.id(k) or k > #data.inputs or not attributes(input, input_attrs) then return false end
+        count = count + 1
+    end
+    return count == #data.inputs
+end
+local function write_attributes(out, attrs, indent)
+    local keys = lousy.util.table.keys(attrs)
+    table.sort(keys)
+    for _, key in ipairs(keys) do
+        local value = attrs[key]
+        local literal = type(value) == "boolean" and tostring(value) or string.format("%q", value)
+        out[#out + 1] = indent .. key .. " = " .. literal .. ",\n"
+    end
+end
+formfiller_wm:add_web_signal("add", broker.policy({ "id", saved_form }, function (_, view, id)
+    local op = operations(view)[id]
+    return op ~= nil and op.kind == "add" and op.save == true
+end), function (_, view, id, data)
+    operations(view)[id] = nil
+    local out = { "on " .. string.format("%q", lousy.util.lua_escape(view.uri)) .. " {\n  form {\n" }
+    write_attributes(out, data.attrs, "    ")
+    for _, input in ipairs(data.inputs) do
+        out[#out + 1] = "    input {\n"
+        write_attributes(out, input, "      ")
+        out[#out + 1] = "    },\n"
+    end
+    out[#out + 1] = "    submit = true,\n    autofill = true,\n  },\n}\n\n"
+    webview.window(view):set_mode()
+    local f = assert(io.open(file, "a"))
+    f:write(table.concat(out))
     f:close()
-    edit()
+    editor.edit(file, nil, nil, view)
 end)
+
+local function send_form(view, form)
+    local id, spec = prepare(view, "fill", {form})
+    formfiller_wm:emit_signal(view, "fill-fast", id, spec)
+end
 
 --- Fills the current page from the formfiller rules.
 -- @tparam table w The window on which to fill the forms.
@@ -265,7 +355,8 @@ local function fill_form_fast(w)
         w:error("no rules matched")
         return
     end
-    formfiller_wm:emit_signal(w.view, "fill-fast", form_specs)
+    local id, specs = prepare(w.view, "fill", form_specs)
+    formfiller_wm:emit_signal(w.view, "fill-fast", id, specs)
 end
 
 -- Support for choosing a form with a menu
@@ -276,14 +367,23 @@ local function fill_form_menu(w)
         w:error("no rules matched")
         return
     end
-    formfiller_wm:emit_signal(w.view, "filter", form_specs)
+    local id, specs = prepare(w.view, "filter", form_specs)
+    formfiller_wm:emit_signal(w.view, "filter", id, specs)
 end
 
-formfiller_wm:add_signal("filter", function (_, view_id, form_specs)
-    local w = w_from_view_id(view_id)
+formfiller_wm:add_web_signal("filter", broker.policy({ "id", broker.ids }, function (_, view, id, ids)
+    local op = operations(view)[id]
+    if not op or op.kind ~= "filter" then return false end
+    for _, match_id in ipairs(ids) do if not op.specs[match_id] then return false end end
+    return webview.window(view) ~= nil
+end), function (_, view, id, ids)
+    local form_specs = operations(view)[id].specs
+    operations(view)[id] = nil
+    local w = webview.window(view)
     -- Build menu
     local menu = {}
-    for _, form in ipairs(form_specs) do
+    for _, match_id in ipairs(ids) do
+        local form = form_specs[match_id]
         if form.profile then
             table.insert(menu, { form.profile, form = form })
         end
@@ -316,7 +416,7 @@ webview.add_signal("init", function (view)
                 domain = lousy.util.lua_escape(domain .. "/")
                 if form_spec.pattern:find(domain, 1, true) then
                     msg.info("auto-filling form profile '%s'", form_spec.profile)
-                    formfiller_wm:emit_signal(view, "apply_form", form_spec)
+                    send_form(view, form_spec)
                 else
                     local w = webview.window(view)
                     w:error("refusing to autofill: URI pattern does not contain current page domain")
@@ -348,7 +448,7 @@ add_binds("formfiller-menu", lousy.util.table.join({
             local row = w.menu:get()
             local form = row.form
             w:set_mode()
-            formfiller_wm:emit_signal(w.view, "apply_form", form)
+            send_form(w.view, form)
         end },
 }, menu_binds))
 
@@ -359,15 +459,23 @@ new_mode("formfiller-add", {
         w:set_input("")
         w:set_ibar_theme()
 
-        formfiller_wm:emit_signal(w.view, "enter")
+        local id = prepare(w.view, "add", {})
+        broker.state(w.view).form_add = id
+        formfiller_wm:emit_signal(w.view, "enter", id)
     end,
 
     changed = function (w, text)
+        local id = broker.state(w.view).form_add
+        local op = id and operations(w.view)[id]
+        if op and text ~= "" then op.save = true end
         formfiller_wm:emit_signal(w.view, "changed", text)
     end,
 
     leave = function (w)
         w:set_ibar_theme()
+        local id = broker.state(w.view).form_add
+        if id then operations(w.view)[id] = nil end
+        broker.state(w.view).form_add = nil
         formfiller_wm:emit_signal(w.view, "leave")
     end,
 })
@@ -377,7 +485,11 @@ add_binds("formfiller-add", {
     { "<Shift-Tab>",    "Focus the previous form hint.",
         function (w) formfiller_wm:emit_signal(w.view, "focus", -1) end },
     { "<Return>", "Add the currently focused form to the formfiller file.",
-        function (w) formfiller_wm:emit_signal(w.view, "select") end },
+        function (w)
+            local id = broker.state(w.view).form_add
+            if id and operations(w.view)[id] then operations(w.view)[id].save = true end
+            formfiller_wm:emit_signal(w.view, "select")
+        end },
 })
 
 -- Setup formfiller binds

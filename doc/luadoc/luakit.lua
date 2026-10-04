@@ -231,4 +231,12 @@
 --- Clear the favicon cache database.
 -- @function clear_favicon_database
 
+--- Confirm a privileged renderer request using trusted GTK UI.
+-- UI-only. Navigation, view destruction or process replacement expires approval.
+-- @function confirm
+-- @tparam widget view The originating WebView.
+-- @tparam string operation The operation to display.
+-- @tparam string target The exact immutable target to display.
+-- @treturn boolean Whether the user approved in the same document.
+
 -- vim: et:sw=4:ts=8:sts=4:tw=80

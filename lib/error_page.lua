@@ -8,7 +8,6 @@
 -- @module error_page
 -- @copyright 2016 Aidan Holm <aidanholm@gmail.com>
 
-local window = require("window")
 local webview = require("webview")
 local lousy = require("lousy")
 local history = require("history")
@@ -157,18 +156,18 @@ local function on_finish(v, status)
     v:add_signal("load-status", on_navigate_away)
 end
 
-local error_views = setmetatable({}, { __mode = "k" })
-error_page_wm:add_signal("click", function (_, view_id, button_idx)
-    -- Get error_views entry with matching view_id
-    local view
-    for _, w in pairs(window.bywidget) do
-        if w.view.id == view_id then view = w.view end
-    end
-    if not view then return end
-    if not error_views[view] then return end
+local broker = require("lousy.broker")
 
-    -- Call button callback
-    error_views[view].buttons[button_idx].callback(view)
+local error_views = setmetatable({}, { __mode = "k" })
+error_page_wm:add_web_signal("click", broker.policy({ "id" }, function (_, view, button_idx)
+    local state = error_views[view]
+    return state ~= nil and state.buttons[button_idx] ~= nil
+        and view_state[view] ~= nil and view_state[view].is_error_page == true
+end), function (_, view, button_idx)
+    local button = error_views[view].buttons[button_idx]
+    if button.confirm and not luakit.confirm(view, button.label, button.confirm) then return end
+    if not error_views[view] or error_views[view].buttons[button_idx] ~= button then return end
+    button.callback(view)
 end)
 
 local function make_button_html(v, buttons)
@@ -345,6 +344,7 @@ local function handle_error(v, uri, err)
             heading = "Your connection may be insecure!",
             buttons = {{
                 label = "Ignore danger until luakit restart",
+                confirm = host .. "\n\n" .. cert,
                 callback = function(vv)
                     luakit.allow_certificate(host, cert)
                     vv:reload()
@@ -352,6 +352,7 @@ local function handle_error(v, uri, err)
             },
             {
                 label = "Ignore danger permanently",
+                confirm = host .. "\n\n" .. cert,
                 callback = function(vv)
                     luakit.allow_certificate(host, cert)
                     -- save certificate to trusted store

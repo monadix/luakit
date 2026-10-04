@@ -8,14 +8,34 @@
 -- serializing multiple Lua parameters.
 --
 --     -- In UI process
+--     local pending = setmetatable({}, { __mode = "k" })
 --     local wm = require_web_module("test_wm")
---     wm:add_signal("test", function (_, text)
+--     wm:add_web_signal("test", {
+--         validate = function (_, _, text, ...) return type(text) == "string" and select("#", ...) == 0 end,
+--         authorize = function (_, view) return pending[view] == true end,
+--     }, function (_, view, text)
+--         pending[view] = nil
 --         msg.info("Web process said %s!", text)
 --     end)
 --
+--     -- Set pending[view] = true before sending the UI request.
+--
 --     -- In test_wm web module
 --     local ui = ipc_channel("test_wm")
---     ui:emit_signal("test", "hello")
+--     ui:emit_signal(page, "test", "hello")
+--
+-- Messages support nil, booleans, finite numbers, binary strings and plain tables
+-- with numeric or string keys. Argument counts and nil positions are preserved.
+-- Limits are 16 MiB per message, 1 MiB per string, depth 32, and 100,000 values.
+-- Functions and pointers are rejected. The bundled label-maker and follow
+-- evaluator operations alone support trusted UI-to-Web function transfer.
+--
+-- A loaded user web module is still an untrusted sender. Policies must check
+-- exact argument types, ranges, the current document and any pending UI action.
+-- Both policy callbacks receive `(channel, originating_view, ...)` and must
+-- return `true`; errors and all other results reject dispatch. Validation runs
+-- before authorization. Navigation, destruction and process loss invalidate
+-- document generations. Context messages cannot dispatch page brokers.
 --
 -- @module ipc
 -- @author Aidan Holm
@@ -24,8 +44,11 @@
 --- Open an IPC channel.
 --
 -- Open an IPC channel and create an `ipc_channel` object. Signals
--- emitted on this object on the web process will call signal handlers
--- on the UI process, and vice versa.
+-- emitted by the UI are delivered to web-process `add_signal()` handlers.
+-- Web-process messages reach only explicit UI `add_web_signal()` registrations.
+-- Renderer code must pass its page object as the first `emit_signal()` argument;
+-- the UI handler receives the originating WebView supplied by WebKit.
+-- Ordinary UI `add_signal()` handlers do not receive renderer messages.
 --
 -- @function ipc_channel
 -- @tparam string name A name that identifies the channel.
@@ -43,5 +66,16 @@
 -- @function require_web_module
 -- @tparam string name The name of the module to load.
 -- @treturn ipc_channel An IPC channel endpoint object.
+
+--- Register a UI broker for hostile renderer messages.
+-- @function ipc_channel:add_web_signal
+-- @tparam string name The renderer signal name.
+-- @tparam table policy Mandatory `validate` and `authorize` callbacks.
+-- @tparam function handler Receives `(channel, originating_view, ...)` after both checks pass.
+--
+-- Use `luakit.confirm(view, operation, target)` when authorizing program launches,
+-- downloaded-file opening or certificate exceptions. This displays trusted GTK
+-- UI and returns true only after approval in the same document. Keep the target
+-- immutable and consume pending operations before invoking privileged code.
 
 -- vim: et:sw=4:ts=8:sts=4:tw=80

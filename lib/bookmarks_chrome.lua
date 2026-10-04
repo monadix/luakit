@@ -18,6 +18,7 @@
 local bookmarks = require("bookmarks")
 local lousy = require("lousy")
 local chrome = require("chrome")
+local broker = require("lousy.broker")
 local markdown = require("markdown")
 local modes = require("modes")
 local add_binds, add_cmds = modes.add_binds, modes.add_cmds
@@ -522,7 +523,23 @@ chrome.add("bookmarks", function ()
         javascript = main_js,
     })
     return html
-end, nil, export_funcs)
+end, nil, export_funcs, {
+    bookmarks_search = { broker.search_options },
+    bookmarks_add = { "string", function (opts)
+        if type(opts) ~= "table" then return false end
+        for k, v in pairs(opts) do
+            if k == "created" then
+                if not broker.id(v) then return false end
+            elseif k == "title" or k == "tags" or k == "desc" then
+                if type(v) ~= "string" or #v > 8192 or v:find("%z") then return false end
+            else return false end
+        end
+        return true
+    end },
+    bookmarks_get = { "id" },
+    bookmarks_remove = { "id" },
+    new_bookmark_values = {},
+})
 
 --- URI of the bookmarks chrome page.
 -- @type string

@@ -110,6 +110,8 @@ local theme = lousy.theme.get()
 
 local _M = {}
 
+local broker = require("lousy.broker")
+
 local follow_wm = require_web_module("follow_wm")
 
 --- Duration to ignore keypresses after following a hint. 200ms by default.
@@ -210,6 +212,9 @@ local function ignore_keys(w)
 end
 
 local function do_follow(w, all)
+    local state = broker.state(w.view)
+    state.follow_replies = all and math.min(state.hints or 1, 1000) or 1
+    state.follow_clicks = state.follow_replies
     follow_wm:emit_signal(w.view, "follow", all)
 end
 
@@ -239,22 +244,38 @@ local function matches_cb(w, n)
     w:set_ibar_theme(n > 0 and "ok" or "error")
 end
 
-follow_wm:add_signal("follow_func", function(_, page_id, ret)
-    for _, w in pairs(window.bywidget) do
-        if w.view.id == page_id then follow_func_cb(w, ret) end
+local function active_follow(_, view)
+    local w = require("webview").window(view)
+    return w ~= nil and w.follow_state ~= nil and w.follow_state.view == view
+        and broker.state(view).follow_active == true
+end
+
+follow_wm:add_web_signal("follow_func", broker.policy({ function (ret)
+    return ret == nil or type(ret) == "string" and #ret <= 8192 and not ret:find("%z")
+end }, function (channel, view, ret)
+    if not active_follow(channel, view) or (broker.state(view).follow_replies or 0) < 1 then return false end
+    local evaluator = require("webview").window(view).follow_state.evaluator
+    if evaluator == "uri" or evaluator == "src" or evaluator == "parent_href" then
+        return ret == nil or broker.uri(ret)
     end
+    return true
+end), function (_, view, ret)
+    local state = broker.state(view)
+    state.follow_replies = state.follow_replies - 1
+    follow_func_cb(require("webview").window(view), ret)
 end)
-follow_wm:add_signal("matches", function(_, page_id, n)
-    for _, w in pairs(window.bywidget) do
-        if w.view.id == page_id then matches_cb(w, n) end
-    end
+follow_wm:add_web_signal("matches", broker.policy({ function (n)
+    return type(n) == "number" and n >= 0 and n <= 100000 and n == math.floor(n)
+end }, active_follow), function (_, view, n)
+    broker.state(view).hints = n
+    matches_cb(require("webview").window(view), n)
 end)
-follow_wm:add_signal("click_a_target_blank", function(_, page_id, href)
-    for _, w in pairs(window.bywidget) do
-        if w.view.id == page_id then
-            w:new_tab(href, { private = w.view.private })
-        end
-    end
+follow_wm:add_web_signal("click_a_target_blank", broker.policy({ "uri" }, function (channel, view)
+    return active_follow(channel, view) and (broker.state(view).follow_clicks or 0) > 0
+end), function (_, view, href)
+    local state = broker.state(view)
+    state.follow_clicks = state.follow_clicks - 1
+    require("webview").window(view):new_tab(href, { private = view.private })
 end)
 
 new_mode("follow", {
@@ -290,6 +311,7 @@ new_mode("follow", {
             w.follow_persist = nil
         end
 
+        broker.state(view).follow_active = true
         w.follow_state = {
             mode = mode, view = view,
             evaluator = mode.evaluator,
@@ -304,11 +326,10 @@ new_mode("follow", {
         w:set_input("")
         w:set_ibar_theme()
 
-        -- Cut func out of mode, since we can't send functions
-        local func = mode.func
-        mode.func = nil
-        follow_wm:emit_signal(w.view, "enter", mode, _M.ignore_case)
-        mode.func = func
+        follow_wm:emit_signal(w.view, "enter", {
+            selector = mode.selector, stylesheet = mode.stylesheet,
+            evaluator = mode.evaluator, persist = mode.persist,
+        }, _M.ignore_case)
     end,
 
     changed = function (w, text)
@@ -318,11 +339,16 @@ new_mode("follow", {
         local pattern_maker = mode.pattern_maker or _M.pattern_maker
         local hint_pat, text_pat = pattern_maker(text)
 
+        if text ~= "" then
+            broker.state(w.view).follow_replies = 1
+            broker.state(w.view).follow_clicks = 1
+        end
         follow_wm:emit_signal(w.view, "changed", hint_pat, text_pat, text)
     end,
 
     leave = function (w)
         w:set_ibar_theme()
+        broker.state(w.view).follow_active = nil
         follow_wm:emit_signal(w.view, "leave")
     end,
 })

@@ -329,6 +329,11 @@ end, nil, {
             return err
         end
     end,
+}, {
+    set_setting = { "string", function (value)
+        return type(value) == "boolean" or type(value) == "number"
+            or type(value) == "string" and #value <= 8192 and not value:find("%z")
+    end, function (kind) return kind == "number" or kind == "boolean" or kind == "string" end },
 })
 
 modes.add_cmds({

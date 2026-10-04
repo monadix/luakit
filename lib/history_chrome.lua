@@ -9,6 +9,7 @@
 -- Grab the luakit environment we need
 local history = require("history")
 local chrome = require("chrome")
+local broker = require("lousy.broker")
 local modes     = require("modes")
 local add_cmds  = modes.add_cmds
 
@@ -403,7 +404,12 @@ chrome.add("history", function ()
         javascript = main_js,
     })
     return html
-end, nil, export_funcs)
+end, nil, export_funcs, {
+    history_search = { broker.search_options },
+    history_clear_all = {},
+    history_clear_list = { broker.ids },
+    initial_search_term = {},
+})
 
 -- Prevent history items from turning up in history
 history.add_signal("add", function (uri)

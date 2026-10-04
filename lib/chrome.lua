@@ -13,6 +13,7 @@ local lousy = require("lousy")
 local webview = require("webview")
 local window = require("window")
 local wm = require_web_module("chrome_wm")
+local broker = require("lousy.broker")
 
 local _M = {}
 
@@ -170,6 +171,7 @@ _M.stylesheet = [===[
 local handlers = {}
 local on_first_visual_handlers = {}
 local page_funcs = {}
+local page_validators = {}
 
 --- Retrieve a list of the currently registered luakit:// handlers.
 -- @treturn {string} A list of `luakit://` handler names, in alphabetical order.
@@ -184,7 +186,8 @@ end
 -- for the chrome page, called when the page first finishes loading.
 -- @tparam table export_funcs An optional table of functions to
 -- export to JavaScript.
-function _M.add(page, func, on_first_visual_func, export_funcs)
+-- @tparam table export_schemas Exact argument schemas for exported functions.
+function _M.add(page, func, on_first_visual_func, export_funcs, export_schemas)
     -- Do some sanity checking
     assert(type(page) == "string",
         "invalid chrome page name (string expected, got "..type(page)..")")
@@ -199,13 +202,19 @@ function _M.add(page, func, on_first_visual_func, export_funcs)
     for name, export_func in pairs(export_funcs or {}) do
         assert(type(name) == "string")
         assert(type(export_func) == "function")
+        assert(export_schemas and export_schemas[name], "chrome exports require argument schemas: " .. name)
     end
 
     handlers[page] = func
     on_first_visual_handlers[page] = on_first_visual_func
     page_funcs[page] = export_funcs
+    page_validators[page] = {}
+    for name, schema in pairs(export_schemas or {}) do
+        page_validators[page][name] = broker.args(schema)
+    end
 
     if page_funcs[page] then
+        page_validators[page].reset_mode = broker.args({})
         page_funcs[page].reset_mode = function (view)
             for _, w in pairs(window.bywidget) do
                 if w.view == view then
@@ -221,6 +230,8 @@ end
 function _M.remove(page)
     handlers[page] = nil
     on_first_visual_handlers[page] = nil
+    page_funcs[page] = nil
+    page_validators[page] = nil
 end
 
 luakit.register_scheme("luakit")
@@ -231,6 +242,7 @@ webview.add_signal("init", function (view)
         -- Match "luakit://page/path"
         local page, path = string.match(uri, "^luakit://([^/]+)/?(.*)")
         if not page then return end
+        broker.state(v).chrome_page = page
 
         local func = handlers[page]
         if func then
@@ -304,19 +316,29 @@ webview.add_signal("init", function (view)
     end)
 end)
 
-wm:add_signal("function-call", function (_, page_id, page_name, func_name, id, args)
-    local func = assert(page_funcs[page_name][func_name])
-    -- Find view
-    local view
-    for _, w in pairs(window.bywidget) do
-        for _, v in pairs(w.tabs.children) do
-            if v.id == page_id then view = v end
+wm:add_web_signal("function-call", {
+    validate = function (_, _, page_name, func_name, id, args, ...)
+        if select("#", ...) ~= 0 or type(page_name) ~= "string" or type(func_name) ~= "string"
+            or not broker.id(id) or type(args) ~= "table" or type(args.n) ~= "number" or not broker.id(args.n + 1)
+            or args.n > 256 then return false end
+        for k in pairs(args) do
+            if k ~= "n" and (not broker.id(k) or k > args.n) then return false end
         end
-    end
-    -- Call Lua function, return result
+        local validator = page_validators[page_name] and page_validators[page_name][func_name]
+        return validator ~= nil and validator(unpack(args, 1, args.n)) == true
+    end,
+    authorize = function (_, view, page_name, func_name, id)
+        local state = broker.state(view)
+        return state.chrome_page == page_name and view.uri:match("^luakit://([^/]+)") == page_name
+            and page_funcs[page_name] ~= nil and page_funcs[page_name][func_name] ~= nil
+            and id > (state.chrome_last_id or 0)
+    end,
+}, function (_, view, page_name, func_name, id, args)
+    broker.state(view).chrome_last_id = id
+    local func = page_funcs[page_name][func_name]
     local ok, ret = xpcall(
-        function () return func(view, unpack(args)) end,
-        function (err)  msg.error(debug.traceback(err, 3)) end)
+        function () return func(view, unpack(args, 1, args.n)) end,
+        function (err) msg.error(debug.traceback(err, 3)) end)
     wm:emit_signal(view, "function-return", id, ok, ret)
 end)
 

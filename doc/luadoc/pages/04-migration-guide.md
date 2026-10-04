@@ -1,6 +1,30 @@
 @name Migration Guide
 #Migration Guide
 
+## Migrating WebProcess modules to the sandbox broker
+
+`require_web_module()` and UI-to-Web `channel:emit_signal()` remain available.
+Web modules now send `channel:emit_signal(page, name, ...)`, passing a page
+object instead of a payload view ID. UI `add_signal()` registrations no longer
+receive renderer traffic. Register `channel:add_web_signal(name, policy, handler)`
+with mandatory `validate` and `authorize` callbacks; the handler receives
+`(channel, originating_view, ...)`. See the @ref{ipc} API for an example.
+
+Treat all renderer data as hostile, including internal-page and user-module
+messages. Validate exact argument counts, types and ranges, and authorize
+against UI-owned state for the originating document. Privileged requests need
+trusted UI confirmation. Never accept code, callback addresses, filenames or
+replacement form specifications from the renderer. Generic IPC no longer
+serializes functions; trusted label makers and follow evaluators remain supported.
+
+Chrome exports require a fifth `chrome.add()` argument mapping each exported
+function to its argument schema. Schemas contain type names or predicates;
+optional types end in `?`. Export calls are bound to the current UI-observed
+internal page. The bundled modules provide examples.
+
+Custom web modules outside the default module directories need explicit sandbox
+grants before the first WebView. See [WebProcess filesystem access](05-configuration.html#webprocess-filesystem-access).
+
 ## Migrating from version 2017-08-10
 
 ### Remove unique instance code from `rc.lua`

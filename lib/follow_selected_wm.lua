@@ -42,12 +42,11 @@ local return_selected = [=[
 })(document);
 ]=]
 
-ui:add_signal("follow_selected", function(_, _, action, view_id)
-    local p = page(view_id)
+ui:add_signal("follow_selected", function(_, p, action)
     local uri = p:eval_js(return_selected)
     if not uri then return end
     assert(type(uri) == "string")
-    ui:emit_signal(action, uri, view_id)
+    ui:emit_signal(p, action, uri)
 end)
 
 -- vim: et:sw=4:ts=8:sts=4:tw=80

@@ -22,7 +22,7 @@ ui:add_signal("load-finished", function(_, page)
             if event.target.tag_name ~= "A" then return end
             if (event.target.attr.href or ""):find("file://", 1, true) ~= 1 then return end
 
-            ui:emit_signal("navigate", page.id, event.target.attr.href)
+            ui:emit_signal(page, "navigate", event.target.attr.href)
         end)
     end
 

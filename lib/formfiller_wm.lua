@@ -119,64 +119,67 @@ local stylesheet = [===[
 ]===]
 
 local dsl_coroutines = {}
+local add_operations = setmetatable({}, { __mode = "k" })
 
-ui:add_signal("dsl_extension_reply", function(_, _, v, view_id)
-    coroutine.resume(dsl_coroutines[view_id],v)
+ui:add_signal("dsl_extension_reply", function(_, _, id, call_id, value)
+    local pending = dsl_coroutines[id]
+    if pending and pending.call_id == call_id then coroutine.resume(pending.co, value) end
 end)
 
-local function traverse(view_id, t)
+local function traverse(page, id, t)
     if type(t) == "table" and t.sentinel then
-        ui:emit_signal("dsl_extension_query", t.key,t.arg,view_id)
-        return coroutine.yield(dsl_coroutines[view_id])
+        dsl_coroutines[id].call_id = t.call_id
+        ui:emit_signal(page, "dsl_extension_query", id, t.call_id)
+        return coroutine.yield()
     elseif type(t) == "table" then
-        for k,v in pairs(t) do t[k] = traverse(view_id, v) end
+        for k, v in pairs(t) do t[k] = traverse(page, id, v) end
     end
     return t
 end
 
-local function apply (form, form_spec, page)
-    local co = coroutine.create(function ()
-        -- Map of attr -> value that form has to match
-        local attrs = {}
-        for _, v in ipairs({"method", "name", "id", "action", "className"}) do
-            attrs[v] = traverse(page.id, form_spec[v]) -- traverse and evaluate attributes
-            form_spec[v] = attrs[v] -- write them back to the form_spec
-        end
-        if not element_attributes_match(form, attrs) then
-            return false
-        end
-        traverse(page.id, form_spec) -- traverse the rest of the form_spec
-        for _, input_spec in ipairs(form_spec.inputs) do
-            local matches = match("input", {"name", "id", "className", "type"}, input_spec, {form})
-            if #matches > 0 then
-                local val = input_spec.value or input_spec.checked
-                if val then fill_input(matches, val) end
-                if input_spec.focus then matches[1]:focus() end
-                if input_spec.select then matches[1]:select() end
-            end
-        end
-        if form_spec.submit then
-            submit_form(form, type(form_spec.submit) == "number" and form_spec.submit or 0)
-        end
-
-        dsl_coroutines[page.id] = nil
-        return true
-    end)
-    dsl_coroutines[page.id] = co
-    coroutine.resume(co)
-end
-
-local function formfiller_fill (page, form, form_specs)
-    assert(type(page) == "page")
-    assert(type(form) == "dom_element" and form.tag_name == "FORM")
-
-    for _, form_spec in ipairs(form_specs) do
-        if apply(form, form_spec, page) then
-            break
+local function apply(form, form_spec, page, id)
+    local attrs = {}
+    for _, v in ipairs({"method", "name", "id", "action", "className"}) do
+        attrs[v] = traverse(page, id, form_spec[v])
+        form_spec[v] = attrs[v]
+    end
+    if not element_attributes_match(form, attrs) then return false end
+    traverse(page, id, form_spec)
+    for _, input_spec in ipairs(form_spec.inputs) do
+        local matches = match("input", {"name", "id", "className", "type"}, input_spec, {form})
+        if #matches > 0 then
+            local val = input_spec.value or input_spec.checked
+            if val then fill_input(matches, val) end
+            if input_spec.focus then matches[1]:focus() end
+            if input_spec.select then matches[1]:select() end
         end
     end
+    if form_spec.submit then
+        submit_form(form, type(form_spec.submit) == "number" and form_spec.submit or 0)
+    end
+    return true
+end
 
-    ui:emit_signal("finished")
+local function formfiller_fill(page, form, form_specs, id)
+    for _, form_spec in ipairs(form_specs) do
+        if apply(form, form_spec, page, id) then break end
+    end
+    ui:emit_signal(page, "finished", id)
+end
+
+local function with_operation(page, id, specs, callback)
+    local co = coroutine.create(function ()
+        -- Resolve only matching attributes before matching; fill values stay lazy.
+        for _, spec in ipairs(specs) do
+            for _, key in ipairs({"method", "name", "id", "action", "className"}) do
+                spec[key] = traverse(page, id, spec[key])
+            end
+        end
+        callback()
+        dsl_coroutines[id] = nil
+    end)
+    dsl_coroutines[id] = { co = co }
+    coroutine.resume(co)
 end
 
 local function get_form_spec_matches_on_page(page, form_specs)
@@ -195,79 +198,49 @@ local function get_form_spec_matches_on_page(page, form_specs)
     return forms
 end
 
-local function formfiller_fill_fast (page, form_specs)
+local function formfiller_fill_fast (page, form_specs, id)
     -- Build list of matchable form elements
     local forms = get_form_spec_matches_on_page(page, form_specs)
 
     if #forms == 0 then
-        ui:emit_signal("failed", page.id, "page has no matchable forms")
+        ui:emit_signal(page, "failed", id, "page has no matchable forms")
         return
     end
     if #forms > 1 then
-        ui:emit_signal("failed", page.id, "page has more than one matchable form")
+        ui:emit_signal(page, "failed", id, "page has more than one matchable form")
         return
     end
 
-    formfiller_fill(page, forms[1], form_specs)
+    formfiller_fill(page, forms[1], form_specs, id)
 end
 
 local function formfiller_add (page, form)
     assert(type(page) == "page")
     assert(type(form) == "dom_element" and form.tag_name == "FORM")
 
-    local function to_lua_str(str)
-        return "'" .. str:gsub("([\\'])", "\\%1").. "'"
+    local function attributes(element, names)
+        local attrs = {}
+        for _, name in ipairs(names) do
+            local value = element.attr[name]
+            if type(value) == "string" and value ~= "" then attrs[name] = value end
+        end
+        return attrs
     end
-    local function to_lua_pat(str)
-        return to_lua_str(lousy.util.lua_escape(str))
-    end
-
-    local function add_attr(elem, attr, indent, tail)
-        local a = elem.attr[attr]
-        if type(a) == "string" and a ~= "" then
-            return indent .. attr .. " = " .. to_lua_str(a) .. tail
-        else
-            return ""
+    local data = { attrs = attributes(form, {"method", "action", "id", "className", "name"}), inputs = {} }
+    for _, input in ipairs(form:query("input")) do
+        if not contains({"button", "submit", "hidden"}, input.type) then
+            local attrs = attributes(input, {"id", "className", "name", "type"})
+            if contains({"radio", "checkbox"}, input.type) then
+                attrs.checked = input.checked == "checked"
+            else attrs.value = input.value or "" end
+            data.inputs[#data.inputs + 1] = attrs
         end
     end
-
-    local inputs = filter(form:query("input"), function(_, input)
-        return not contains({"button", "submit", "hidden"}, input.type)
-    end)
-
-    -- Build formfiller config for form
-    local str = { "on " .. to_lua_pat(page.uri) .. " {\n"}
-    table.insert(str, "  form {\n")
-    for _, attr in ipairs({"method", "action", "id", "className", "name"}) do
-        table.insert(str, add_attr(form, attr, "    ", ",\n"))
-    end
-    for _, input in ipairs(inputs) do
-        table.insert(str, "    input {\n      ")
-        for _, attr in ipairs({"id", "className", "name", "type"}) do
-            table.insert(str, add_attr(input, attr, "", ", "))
-        end
-        if contains({"radio", "checkbox"}, input.type) then
-            table.insert(str, "\n      checked = " .. (input.checked or "false") .. ",\n")
-        else
-            table.insert(str, "\n      value = " .. to_lua_str(input.value or "") .. ",\n")
-        end
-        table.insert(str, "    },\n")
-    end
-    table.insert(str, "    submit = true,\n")
-    table.insert(str, "    autofill = true,\n")
-    table.insert(str, "  },\n")
-    table.insert(str, "}\n\n")
-    str = table.concat(str)
-
-    ui:emit_signal("add", page.id, str)
+    ui:emit_signal(page, "add", add_operations[page], data)
 end
 
-ui:add_signal("fill-fast", function(_, page, form_specs)
-    formfiller_fill_fast(page, form_specs)
-end)
-
-ui:add_signal("apply_form", function(_, page, form)
-    formfiller_fill_fast(page, {form})
+ui:add_signal("fill-fast", function(_, page, id, form_specs)
+    with_operation(page, id, form_specs, function () formfiller_fill_fast(page, form_specs, id) end)
 end)
 
 ui:add_signal("leave", function (_, page)
@@ -280,7 +253,8 @@ end)
 
 -- Visual formfiller add
 
-ui:add_signal("enter", function (_, page)
+ui:add_signal("enter", function (_, page, id)
+    add_operations[page] = id
     -- Filter forms to those with valid inputs
     local forms = page.document.body:query("form")
     forms = filter(forms, function(_, form)
@@ -292,7 +266,7 @@ ui:add_signal("enter", function (_, page)
     end)
     -- Error out if there aren't any forms to add
     if #forms == 0 then
-        ui:emit_signal("failed", page.id, "page has no forms that can be added")
+        ui:emit_signal(page, "failed", id, "page has no forms that can be added")
     end
     select.enter(page, forms, stylesheet, true)
 end)
@@ -310,16 +284,16 @@ ui:add_signal("select", function (_, page)
     formfiller_add(page, hint.elem)
 end)
 
-ui:add_signal("filter", function (_, page, form_specs)
-    local matching_form_specs = {}
-    local roots = { page.document.body }
-    for _, form_spec in ipairs(form_specs) do
-        local matches = match("form", {"method", "name", "id", "action", "className"}, form_spec, roots)
-        if #matches > 0 then
-            matching_form_specs[#matching_form_specs+1] = form_spec
+ui:add_signal("filter", function (_, page, id, form_specs)
+    with_operation(page, id, form_specs, function ()
+        local matching_form_specs = {}
+        local roots = { page.document.body }
+        for match_id, form_spec in ipairs(form_specs) do
+            local matches = match("form", {"method", "name", "id", "action", "className"}, form_spec, roots)
+            if #matches > 0 then matching_form_specs[#matching_form_specs + 1] = match_id end
         end
-    end
-    ui:emit_signal("filter", page.id, matching_form_specs)
+        ui:emit_signal(page, "filter", id, matching_form_specs)
+    end)
 end)
 
 -- vim: et:sw=4:ts=8:sts=4:tw=80

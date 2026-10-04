@@ -11,25 +11,25 @@ local window = require("window")
 local lousy = require("lousy")
 local settings = require("settings")
 
+local broker = require("lousy.broker")
+
 local _M = {}
 
 lousy.signal.setup(_M, true)
 
 local web_module = require_web_module("webview_wm")
 
-web_module:add_signal("form-active", function (_, page_id)
-    for _, w in pairs(window.bywidget) do
-        if w.view.id == page_id then
-            w.view:emit_signal("form-active")
-        end
-    end
+web_module:add_web_signal("form-active", broker.policy({}, function (_, view)
+    return _M.window(view) ~= nil
+end), function (_, view)
+    view:emit_signal("form-active")
 end)
 
-web_module:add_signal("navigate", function (_, page_id, uri)
-    msg.verbose("Got luakit:// -> file:// navigation: %s", uri)
-    for _, w in pairs(window.bywidget) do
-        if w.view.id == page_id then w.view.uri = uri end
-    end
+web_module:add_web_signal("navigate", broker.policy({ "string" }, function (_, view, uri)
+    return view.uri:match("^luakit://") ~= nil and uri:match("^file://") ~= nil
+        and luakit.confirm(view, "Open local file", uri)
+end), function (_, view, uri)
+    view.uri = uri
 end)
 
 local webview_state = setmetatable({}, { __mode = "k" })

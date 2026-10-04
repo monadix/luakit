@@ -238,6 +238,9 @@ nil,
     adblock_list_toggle = function (_, id, enable)
         adblock.list_set_enabled(id, enable)
     end,
+}, {
+    adblock_toggle = { "boolean" },
+    adblock_list_toggle = { "id", "boolean" },
 })
 
 --- CSS for error page shown when page navigation is blocked.

@@ -63,12 +63,14 @@ _M.editor_cmd = _M.builtin.xdg_open
 -- @tparam[opt] number line The line number at which to begin editing.
 -- @tparam[opt] function callback A callback that fires when the process spawned
 -- by the editor command exits, of type @ref{process_exit_cb}.
-_M.edit = function (file, line, callback)
+-- @tparam[opt] widget originating_view Require trusted UI confirmation for this WebView.
+_M.edit = function (file, line, callback, originating_view)
     local subs = {
         file = file,
         line = line or 1,
     }
     local cmd = string.gsub(_M.editor_cmd, "{(%w+)}", subs)
+    if originating_view and not luakit.confirm(originating_view, "Launch editor", cmd) then return end
     luakit.spawn(cmd, callback)
 end
 
