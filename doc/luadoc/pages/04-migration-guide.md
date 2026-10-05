@@ -3,27 +3,142 @@
 
 ## Migrating WebProcess modules to the sandbox broker
 
-`require_web_module()` and UI-to-Web `channel:emit_signal()` remain available.
-Web modules now send `channel:emit_signal(page, name, ...)`, passing a page
-object instead of a payload view ID. UI `add_signal()` registrations no longer
-receive renderer traffic. Register `channel:add_web_signal(name, policy, handler)`
-with mandatory `validate` and `authorize` callbacks; the handler receives
-`(channel, originating_view, ...)`. See the @ref{ipc} API for an example.
+UI-only keybindings, settings and scripts retain their existing filesystem access.
+`require_web_module()` still loads user modules from the active configuration
+and profile directory. The sandbox applies to the WebProcess, not the UI.
 
-Treat all renderer data as hostile, including internal-page and user-module
-messages. Validate exact argument counts, types and ranges, and authorize
-against UI-owned state for the originating document. Privileged requests need
-trusted UI confirmation. Never accept code, callback addresses, filenames or
-replacement form specifications from the renderer. Generic IPC no longer
-serializes functions; trusted label makers and follow evaluators remain supported.
+### Compatibility adapters
 
-Chrome exports require a fifth `chrome.add()` argument mapping each exported
-function to its argument schema. Schemas contain type names or predicates;
-optional types end in `?`. Export calls are bound to the current UI-observed
-internal page. The bundled modules provide examples.
+UI-to-Web `channel:emit_signal(view, name, ...)` and broadcasts remain supported,
+including serializable Lua functions and their upvalues. Functions run in the
+WebProcess; they cannot carry UI userdata, C functions or pointer references.
 
-Custom web modules outside the default module directories need explicit sandbox
-grants before the first WebView. See [WebProcess filesystem access](05-configuration.html#webprocess-filesystem-access).
+Tables are copied as raw entries, even when they have metatables. Metatables and
+metamethod behavior do not cross IPC. Receivers get ordinary tables. Values must
+remain bounded: 16 MiB per message, 1 MiB per string, depth 32 and 100,000 values.
+Numeric/string keys, finite numbers, booleans, binary strings and nil arguments
+are supported. Cycles, userdata and pointers are rejected.
+
+### UI handlers must explicitly authorize renderer traffic
+
+A two-argument `channel:add_signal(name, handler)` is process-local. It never
+receives renderer messages, even if another handler for that name opts in.
+Old handler signatures can be preserved by adding a third policy argument:
+
+```lua
+-- UI module: bind this example to an existing UI-owned view.
+local broker = require("lousy.broker")
+local wm = require_web_module("example_wm")
+wm:add_signal("uri", function (_, id, text)
+    broker.state(view).awaiting_uri = nil
+    w:notify(text)
+end, {
+    legacy_page_arg = 1,
+    validate = function (_, originating, id, text, ...)
+        return originating == view and id == originating.id
+            and type(text) == "string" and #text <= 8192
+            and select("#", ...) == 0
+    end,
+    authorize = function (_, originating)
+        return broker.state(originating).awaiting_uri == true
+    end,
+})
+-- Set this only when the UI initiates the operation.
+broker.state(view).awaiting_uri = true
+wm:emit_signal(view, "get-uri")
+```
+
+The existing web-side reply can remain:
+
+```lua
+local ui = ipc_channel("example_wm")
+ui:add_signal("get-uri", function (_, page)
+    ui:emit_signal("uri", page.id, page.uri)
+end)
+```
+
+Both policy callbacks receive `(channel, originating_view, ...old_payload)`;
+errors or anything except `true` reject dispatch. The legacy handler still
+receives `(channel, ...old_payload)`. `legacy_page_arg` is a one-based payload
+position, not a position including the signal name. Use `2` for an old reply
+such as `emit_signal("uri", text, page.id)`, and adjust its handler/validator
+argument order accordingly. Conflicting positions and mixing legacy and modern
+broker registrations for the same signal are errors. Multiple opted-in handlers
+are supported; existing signal removal methods remove their registrations too.
+
+Alternatively, use `add_web_signal(name, policy, handler)`. Its handler receives
+`(channel, originating_view, ...)`; pass a page explicitly from the web module:
+`ui:emit_signal(page, "uri", text)`.
+
+### Replies without a page ID
+
+Legacy `emit_signal(name, ...)` can infer a page during a page-specific UI
+channel callback, `page-created`, registered JavaScript-function callback,
+`document-loaded`, `send-request`, or DOM event callback. This context ends when
+the callback returns and is restored after nested callbacks and errors.
+
+Timers, idle callbacks and process-wide broadcasts do not have an implicit
+page. Preserve an existing page-ID payload and declare `legacy_page_arg`, or
+capture a page explicitly:
+
+```lua
+luakit.idle_add(function () ui:emit_signal(page, "uri", page.uri) end)
+```
+
+A declared ID must identify a live page and agree with any current callback
+page. There is no active-tab or single-tab fallback. Process-wide diagnostic
+modules must choose an explicit originating page for broker notifications;
+context traffic cannot invoke page-specific UI operations.
+
+### Cases that cannot safely retain the old behavior
+
+Every WebProcess message is hostile, including messages from internal pages and
+user-authored modules. Loading a module is not an authorization grant.
+
+- **Automatic UI dispatch:** add a validation/authorization policy. Never use
+  an unconditional policy for a handler that launches programs, opens files,
+  changes certificate trust or writes host state.
+- **Web-to-UI functions or callback pointers:** send bounded data and an
+  operation ID. Keep callbacks and operation records in the UI, bind them to
+  the originating view/document, and consume requests before acting. Navigation
+  and process replacement invalidate the broker generation.
+- **Renderer-selected filenames, programs or form specifications:** resolve
+  IDs against UI-owned records. Do not execute renderer-generated Lua source;
+  send structured form data and generate quoted persistence text in the UI.
+  Existing form DSL files remain usable; copied old formfiller web modules must
+  adopt the new protocol.
+- **Privileged requests:** keep the exact target immutable and use
+  `luakit.confirm(view, operation, target)` before program launch, downloaded-file
+  opening or certificate exceptions. Renderer navigation to internal/local-file
+  pages requires UI approval too. UI-selected exact destinations remain allowed.
+- **Arbitrary filesystem access:** grant specific existing absolute paths with
+  `luakit.add_path_to_sandbox(path)` before the first WebView. The default is
+  read-only; use `false` only for an intentional write grant. Search-path changes
+  alone do not grant access. Move sensitive file operations into the UI instead
+  of granting home, data/cache or temporary-directory roots.
+- **Old bundled-module overrides:** merge the updated follow, formfiller,
+  chrome and error-page protocols into copied modules. Adapters do not restore
+  removed unsafe built-in operations.
+
+### Custom internal pages
+
+Legacy four-argument `chrome.add()` still registers and renders the page, but
+exports without schemas are disabled with a migration warning. Restore each
+export by adding a fifth argument:
+
+```lua
+chrome.add("example", render, nil, { search = search }, {
+    search = { "string" },
+})
+```
+
+Schemas contain type names or predicates; optional types end in `?`. An
+explicit schema table must cover every export. Calls must match the UI-observed
+internal page. Schemas validate data; privileged exports still need UI-owned
+operation checks and confirmation.
+
+See the @ref{ipc} API and
+[WebProcess filesystem access](05-configuration.html#webprocess-filesystem-access).
 
 ## Migrating from version 2017-08-10
 

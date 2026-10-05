@@ -78,7 +78,9 @@ child, and the resolved native `lfs` module file. Development builds also grant
 checkout `lib`, `config` and `resources`. Optional absent directories are skipped;
 missing required dependencies fail startup without disabling the sandbox.
 
-Additional module search paths do not automatically grant filesystem access.
+These restrictions apply to WebProcesses; UI-only scripts retain their normal
+filesystem access. Additional module search paths do not automatically grant
+filesystem access.
 Register a specific existing absolute path in `rc.lua` before constructing the
 first WebView:
 

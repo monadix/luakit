@@ -27,8 +27,9 @@
 -- Messages support nil, booleans, finite numbers, binary strings and plain tables
 -- with numeric or string keys. Argument counts and nil positions are preserved.
 -- Limits are 16 MiB per message, 1 MiB per string, depth 32, and 100,000 values.
--- Functions and pointers are rejected. The bundled label-maker and follow
--- evaluator operations alone support trusted UI-to-Web function transfer.
+-- Web-to-UI functions and pointers are rejected. UI-to-Web messages support
+-- serializable Lua functions with bounded upvalues. Tables with metatables are
+-- copied as raw entries; receivers get plain tables and no metamethods run.
 --
 -- A loaded user web module is still an untrusted sender. Policies must check
 -- exact argument types, ranges, the current document and any pending UI action.
@@ -45,10 +46,11 @@
 --
 -- Open an IPC channel and create an `ipc_channel` object. Signals
 -- emitted by the UI are delivered to web-process `add_signal()` handlers.
--- Web-process messages reach only explicit UI `add_web_signal()` registrations.
--- Renderer code must pass its page object as the first `emit_signal()` argument;
--- the UI handler receives the originating WebView supplied by WebKit.
--- Ordinary UI `add_signal()` handlers do not receive renderer messages.
+-- Web-process messages reach explicit UI `add_web_signal()` registrations or
+-- individual `add_signal()` handlers with a third policy argument. Two-argument
+-- registrations remain local and receive no renderer messages. Explicit page
+-- sending is preferred; legacy sending supports declared page-ID positions and
+-- scoped page callbacks. The receiving WebView always comes from WebKit.
 --
 -- @function ipc_channel
 -- @tparam string name A name that identifies the channel.
@@ -66,6 +68,19 @@
 -- @function require_web_module
 -- @tparam string name The name of the module to load.
 -- @treturn ipc_channel An IPC channel endpoint object.
+
+--- Register a local signal handler, optionally accepting renderer messages.
+-- A third policy argument is UI-only. Its validate/authorize callbacks receive
+-- `(channel, originating_view, ...payload)` and must return exactly true.
+-- The handler keeps `(channel, ...payload)` for both local and renderer calls.
+-- `policy.legacy_page_arg` optionally declares a one-based page-ID payload
+-- position; the ID must equal the receiving WebView's ID. Each handler opts in
+-- separately. Multiple legacy handlers must agree on the position and cannot
+-- share a signal name with a modern add_web_signal registration.
+-- @function ipc_channel:add_signal
+-- @tparam string name Signal name.
+-- @tparam function handler Existing local handler signature.
+-- @tparam[opt] table policy Explicit validation and authorization policy.
 
 --- Register a UI broker for hostile renderer messages.
 -- @function ipc_channel:add_web_signal
