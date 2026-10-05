@@ -31,6 +31,28 @@ T.test_chrome_cannot_select_another_internal_page = function ()
     assert(called == 0)
 end
 
+T.test_legacy_chrome_pages_render_with_exports_disabled_until_schematized = function ()
+    local chrome = require("chrome")
+    local called = 0
+    local render = function () return "<html><title>Compatibility</title><body>legacy</body></html>" end
+    local exported = function () called = called + 1 end
+    chrome.add("compat-legacy", render, nil, { legacy_export = exported })
+    assert(not pcall(chrome.add, "compat-invalid", render, nil, { legacy_export = exported }, {}))
+    w:navigate("luakit://compat-legacy/")
+    test.wait_for_view(w.view)
+    test.wait_until(function () return w.view.uri == "luakit://compat-legacy/" and w.view.title == "Compatibility" end)
+    send("chrome_wm", "function-call", "compat-legacy", "legacy_export", 1, { n = 0 })
+    assert(called == 0)
+    chrome.add("compat-legacy", render, nil, { legacy_export = exported }, { legacy_export = {} })
+    send("chrome_wm", "function-call", "compat-legacy", "legacy_export", 2, { n = 0 })
+    assert(called == 1)
+    w:navigate("luakit://help/")
+    test.wait_for_view(w.view)
+    send("chrome_wm", "function-call", "compat-legacy", "legacy_export", 3, { n = 0 })
+    assert(called == 1)
+    chrome.remove("compat-legacy")
+end
+
 T.test_unsolicited_follow_navigation_download_and_error_buttons_are_rejected = function ()
     w:navigate("about:blank")
     test.wait_for_view(w.view)

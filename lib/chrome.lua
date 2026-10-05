@@ -186,7 +186,7 @@ end
 -- for the chrome page, called when the page first finishes loading.
 -- @tparam table export_funcs An optional table of functions to
 -- export to JavaScript.
--- @tparam table export_schemas Exact argument schemas for exported functions.
+-- @tparam[opt] table export_schemas Exact argument schemas; exports are disabled when omitted.
 function _M.add(page, func, on_first_visual_func, export_funcs, export_schemas)
     -- Do some sanity checking
     assert(type(page) == "string",
@@ -202,7 +202,14 @@ function _M.add(page, func, on_first_visual_func, export_funcs, export_schemas)
     for name, export_func in pairs(export_funcs or {}) do
         assert(type(name) == "string")
         assert(type(export_func) == "function")
-        assert(export_schemas and export_schemas[name], "chrome exports require argument schemas: " .. name)
+        if export_schemas then
+            assert(export_schemas[name], "chrome exports require argument schemas: " .. name)
+        end
+    end
+
+    if export_funcs and next(export_funcs) and not export_schemas then
+        msg.warn("Chrome page %s: exports disabled; add argument schemas as the fifth chrome.add argument", page)
+        export_funcs = nil
     end
 
     handlers[page] = func
