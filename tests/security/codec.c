@@ -55,6 +55,7 @@ main(void)
     g_assert_cmpint(luaL_dostring(L,
         "local t = {}; t.self = t; assert(not pcall(encode_for_test, t)); "
         "assert(not pcall(encode_for_test, function() end)); "
+        "assert(not pcall(encode_for_test, {[function() end] = true})); "
         "assert(not pcall(encode_for_test, io.stdout)); "
         "assert(not pcall(encode_for_test, string.rep('x', 1024 * 1024 + 1)))"), ==, 0);
     g_assert_cmpint(luaL_dostring(L,
@@ -81,6 +82,17 @@ main(void)
     lua_pushnumber(L, 3.5);
     lua_pushstring(L, "value");
     lua_rawset(L, -3);
+    lua_pushboolean(L, TRUE);
+    lua_pushstring(L, "true key");
+    lua_rawset(L, -3);
+    lua_pushboolean(L, FALSE);
+    lua_pushstring(L, "false key");
+    lua_rawset(L, -3);
+    lua_newtable(L);
+    lua_pushliteral(L, "nested key");
+    lua_rawseti(L, -2, 1);
+    lua_pushliteral(L, "table key");
+    lua_rawset(L, -3);
     lua_pushnil(L);
     GByteArray *out = g_byte_array_new();
     lua_serialize_range(L, out, 1, 6);
@@ -93,6 +105,26 @@ main(void)
     lua_pushnumber(L, 3.5);
     lua_rawget(L, 5);
     g_assert_cmpstr(lua_tostring(L, -1), ==, "value");
+    lua_pushboolean(L, TRUE);
+    lua_rawget(L, 5);
+    g_assert_cmpstr(lua_tostring(L, -1), ==, "true key");
+    lua_pushboolean(L, FALSE);
+    lua_rawget(L, 5);
+    g_assert_cmpstr(lua_tostring(L, -1), ==, "false key");
+    lua_pop(L, 1);
+    gboolean found_table_key = FALSE;
+    lua_pushnil(L);
+    while (lua_next(L, 5)) {
+        if (lua_istable(L, -2)) {
+            g_assert_cmpstr(lua_tostring(L, -1), ==, "table key");
+            lua_rawgeti(L, -2, 1);
+            g_assert_cmpstr(lua_tostring(L, -1), ==, "nested key");
+            lua_pop(L, 1);
+            found_table_key = TRUE;
+        }
+        lua_pop(L, 1);
+    }
+    g_assert(found_table_key);
     lua_settop(L, 0);
     g_byte_array_unref(out);
     reject(L, g_variant_new_uint64(0xdeadbeef));
@@ -102,7 +134,7 @@ main(void)
     reject(L, g_variant_new_double(NAN));
     GVariantBuilder table;
     g_variant_builder_init(&table, G_VARIANT_TYPE("a(vv)"));
-    g_variant_builder_add(&table, "(vv)", g_variant_new_boolean(TRUE), g_variant_new_double(1));
+    g_variant_builder_add(&table, "(vv)", g_variant_new_handle(1), g_variant_new_double(1));
     reject(L, g_variant_builder_end(&table));
     g_variant_builder_init(&table, G_VARIANT_TYPE("a(vv)"));
     g_variant_builder_add(&table, "(vv)", g_variant_new_tuple(NULL, 0), g_variant_new_double(1));
@@ -138,6 +170,23 @@ main(void)
     lua_call(L, 0, 1);
     g_assert_cmpint(lua_tointeger(L, -1), ==, 123);
     lua_settop(L, 0);
+    g_assert_cmpint(luaL_dostring(L,
+        "local value = 456; return {[function() return value end] = 'function key'}"), ==, 0);
+    GByteArray *function_key = g_byte_array_new();
+    lua_serialize_trusted_range(L, function_key, 1, 1);
+    lua_settop(L, 0);
+    g_assert_cmpint(lua_deserialize_range(L, function_key->data, function_key->len), ==, -1);
+    g_assert_cmpint(lua_gettop(L), ==, 0);
+    g_assert_cmpint(lua_deserialize_trusted_range(L, function_key->data, function_key->len), ==, 1);
+    lua_pushnil(L);
+    g_assert(lua_next(L, 1));
+    g_assert(lua_isfunction(L, -2));
+    g_assert_cmpstr(lua_tostring(L, -1), ==, "function key");
+    lua_pushvalue(L, -2);
+    lua_call(L, 0, 1);
+    g_assert_cmpint(lua_tointeger(L, -1), ==, 456);
+    lua_settop(L, 0);
+    g_byte_array_unref(function_key);
 #endif
     g_byte_array_unref(out);
     /* Random corrupt/truncated av input must never change the Lua stack. */

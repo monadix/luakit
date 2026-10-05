@@ -422,6 +422,9 @@ load_changed_cb(WebKitWebView* UNUSED(v), WebKitLoadEvent e, widget_t *w)
         ((webview_data_t*) w->data)->is_committed = FALSE;
     } else if (e == WEBKIT_LOAD_COMMITTED || e == WEBKIT_LOAD_FINISHED) {
         ((webview_data_t*) w->data)->is_committed = TRUE;
+        /* A provisional renderer can announce itself before becoming current. */
+        if (e == WEBKIT_LOAD_COMMITTED && d->ipc->status == IPC_ENDPOINT_CONNECTED)
+            ipc_initialize_webview(d->ipc);
     }
 
     /* Store certificate information about current page */
@@ -939,7 +942,8 @@ parse_uri(const gchar *uri) {
     if (!uri || !uri[0] || !g_strcmp0(uri, "about:blank"))
         return g_strdup("about:blank");
     /* check for scheme or "about:blank" */
-    else if (g_strrstr(uri, "://"))
+    else if (g_strrstr(uri, "://") || !g_ascii_strncasecmp(uri, "data:", 5) ||
+            !g_ascii_strncasecmp(uri, "blob:", 5) || !g_ascii_strncasecmp(uri, "about:", 6))
         return g_strdup(uri);
     /* check if uri points to a file */
     else if (file_exists(uri)) {
@@ -1372,6 +1376,7 @@ webview_crashed_cb(WebKitWebView *UNUSED(view), widget_t *w)
 {
     /* Invalidate all capabilities belonging to the terminated renderer. */
     webview_data_t *d = w->data;
+    d->web_process_id = 0;
     g_clear_pointer(&d->navigation_uri, g_free);
     run_javascript_cancel(d->ipc);
     ipc_endpoint_disconnect(d->ipc);
@@ -1390,6 +1395,14 @@ static void
 webview_terminated_cb(WebKitWebView *view, WebKitWebProcessTerminationReason UNUSED(reason), widget_t *w)
 {
     webview_crashed_cb(view, w);
+}
+
+void
+webview_reset_endpoint(widget_t *w)
+{
+    ipc_endpoint_t *ipc = webview_get_endpoint(w);
+    run_javascript_cancel(ipc);
+    ipc_endpoint_invalidate(ipc);
 }
 
 void

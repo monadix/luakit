@@ -118,6 +118,8 @@ luaH_webview_eval_js(lua_State *L)
     bool no_return = false;
 
     luaH_checktable(L, 3);
+    if (!ipc_endpoint_can_send(d->ipc, 1))
+        return luaL_error(L, "IPC queue is full");
 
     gint top = lua_gettop(L);
     /* source filename to use in error messages and webinspector */

@@ -65,6 +65,9 @@ local add_cmds  = modes.add_cmds
 
 local _M = {}
 
+local broker = require("lousy.broker")
+local sync_rules
+
 local adblock_wm = require_web_module("adblock_wm")
 
 -- Adblock Plus compatible filter lists.
@@ -329,16 +332,17 @@ local function list_opts_modify(list_index, opt_ex, opt_inc)
         end
     end
 
+    list.opts = opts
+
     -- Manage list's rules
     if util.table.hasitem(opt_inc, "Enabled") then
-        adblock_wm:emit_signal("list_set_enabled", list.title, true)
+        sync_rules()
         _M.refresh_views()
     elseif util.table.hasitem(opt_inc, "Disabled") then
-        adblock_wm:emit_signal("list_set_enabled", list.title, false)
+        sync_rules()
         _M.refresh_views()
     end
 
-    list.opts = opts
     write_subscriptions()
 end
 
@@ -429,7 +433,7 @@ _M.load = function (reload, single_list, no_sync)
     end
 
     if not no_sync and not single_list then
-        adblock_wm:emit_signal("update_rules", _M.rules)
+        sync_rules()
     end
     _M.refresh_views()
 end
@@ -452,45 +456,171 @@ local page_whitelist = {}
 _M.whitelist_domain_access = function (domain)
     if lousy.util.table.hasitem(page_whitelist, domain) then return end
     table.insert(page_whitelist, domain)
-    adblock_wm:emit_signal("update_page_whitelist", page_whitelist)
+    sync_rules()
 end
 
-local new_web_extension_created
+-- Each record creates a table or assigns a scalar at an explicit path. This
+-- splits even a single large domain/options bucket without executable data.
+local function rule_chunks(snapshot)
+    local chunks, chunk = {}, {}
+    local count, bytes = 16, 2048 -- Include channel, signal and transfer framing.
+    local function cost(value)
+        local n, size = 1, 128 -- Conservative bound for GVariant framing/alignment.
+        if type(value) == "string" then size = size + #value end
+        if type(value) == "table" then
+            for k, v in pairs(value) do
+                local kn, kb = cost(k)
+                local vn, vb = cost(v)
+                n, size = n + kn + vn, size + kb + vb
+            end
+        end
+        return n, size
+    end
+    local function add(path, value)
+        local record = { path, value }
+        local n, size = cost(record)
+        n, size = n + 1, size + 128 -- The chunk's array index.
+        assert(n + 16 <= 4096 and size + 2048 <= 256 * 1024,
+            "an adblock rule exceeds the transfer chunk limit")
+        if count + n > 4096 or bytes + size > 256 * 1024 then
+            chunks[#chunks + 1], chunk = chunk, {}
+            count, bytes = 16, 2048
+        end
+        chunk[#chunk + 1] = record
+        count, bytes = count + n, bytes + size
+    end
+    local function walk(value, path)
+        assert(#path <= 24, "adblock rules are too deeply nested")
+        add(path, type(value) == "table" and {} or value)
+        if type(value) == "table" then
+            for k, v in pairs(value) do
+                local child = util.table.clone(path)
+                child[#child + 1] = k
+                walk(v, child)
+            end
+        end
+    end
+    walk(snapshot, {})
+    if #chunk > 0 then chunks[#chunks + 1] = chunk end
+    return chunks
+end
+
+local views = setmetatable({}, { __mode = "k" })
+local next_transfer = 0
+
+local function cancel_transfer(view)
+    local state = views[view]
+    local pending = state and state.pending
+    if not pending then return end
+    if pending.timeout.started then pending.timeout:stop() end
+    state.pending = nil
+    if pending.document.adblock_pending == pending then
+        pending.document.adblock_pending = nil
+    end
+    adblock_wm:emit_signal(view, "rules_abort", pending.id)
+end
+
+local function transfer_failed(view, err)
+    cancel_transfer(view)
+    views[view].failed = true
+    local text = "adblock: " .. tostring(err) .. "; retry :adblock-reload or disable with :adblock-disable"
+    msg.warn("%s", text)
+    local w = webview.window(view)
+    if w then w:error(text) end
+end
+
+local function send_transfer(view, signal, ...)
+    local pending = views[view].pending
+    if pending.timeout.started then pending.timeout:stop() end
+    pending.timeout:start()
+    local ok, err = pcall(adblock_wm.emit_signal, adblock_wm, view, signal, pending.id, ...)
+    if not ok then transfer_failed(view, err) end
+end
+
+local function start_transfer(view, chunks)
+    cancel_transfer(view)
+    local state = views[view]
+    state.failed = nil
+    webview.modify_load_block(view, "adblock", _M.enabled)
+    if not chunks then
+        local ok, result = pcall(rule_chunks, _M.rules)
+        if not ok then transfer_failed(view, result); return end
+        chunks = result
+    end
+    next_transfer = next_transfer + 1
+    local pending = {
+        id = next_transfer, sequence = 0, chunks = chunks, timeout = timer{ interval = 30000 },
+        document = broker.state(view),
+    }
+    state.pending = pending
+    pending.document.adblock_pending = pending
+    pending.timeout:add_signal("timeout", function ()
+        if state.pending == pending then transfer_failed(view, "rule transfer timed out") end
+    end)
+    adblock_wm:emit_signal(view, "enable", _M.enabled)
+    adblock_wm:emit_signal(view, "update_page_whitelist", page_whitelist)
+    send_transfer(view, "rules_begin")
+end
+
+sync_rules = function ()
+    local ok, chunks = pcall(rule_chunks, _M.rules)
+    for view, state in pairs(views) do
+        if state.initialized then
+            if ok then start_transfer(view, chunks)
+            else
+                webview.modify_load_block(view, "adblock", _M.enabled)
+                transfer_failed(view, chunks)
+            end
+        end
+    end
+end
 
 webview.add_signal("init", function (view)
+    views[view] = {}
+    -- Register document invalidation before our interrupted-transfer restart.
+    broker.state(view)
     webview.modify_load_block(view, "adblock", _M.enabled)
-
-    view:add_signal("web-extension-loaded", function (v)
-        if not new_web_extension_created then
-            webview.modify_load_block(v, "adblock", false)
-        end
-        new_web_extension_created = nil
+    view:add_signal("load-status", function (_, status)
+        local state = views[view]
+        if status == "provisional" and state.pending then start_transfer(view) end
     end)
-
-    -- if adblocking is disabled, unblock the tab as soon as it's switched to
-    local function unblock(vv)
-        if not _M.enabled then
-            webview.modify_load_block(vv, "adblock", false)
-        end
-        vv:remove_signal("switched-page", unblock)
-    end
-    view:add_signal("switched-page", unblock)
+    view:add_signal("crashed", function ()
+        cancel_transfer(view)
+        views[view].initialized = nil
+        -- A native load is required to launch the replacement process.
+        webview.modify_load_block(view, "adblock", false)
+    end)
+    view:add_signal("destroy", function ()
+        cancel_transfer(view)
+        views[view] = nil
+    end)
 end)
-adblock_wm:add_web_signal("rules_updated", require("lousy.broker").policy({}, function (_, view)
-    return require("lousy.broker").state(view).adblock_pending == true
+
+adblock_wm:add_web_signal("rules_ack", broker.policy({ "id", function (n)
+    return type(n) == "number" and n >= 0 and n == math.floor(n)
+end }, function (_, view, id, sequence)
+    local pending = views[view] and views[view].pending
+    return pending ~= nil and broker.state(view).adblock_pending == pending
+        and pending.id == id and pending.sequence == sequence
 end), function (_, view)
-    require("lousy.broker").state(view).adblock_pending = nil
-    webview.modify_load_block(view, "adblock", false)
+    local pending = views[view].pending
+    pending.sequence = pending.sequence + 1
+    local chunk = pending.chunks[pending.sequence]
+    if chunk then send_transfer(view, "rules_chunk", pending.sequence, chunk)
+    elseif pending.sequence == #pending.chunks + 1 then
+        send_transfer(view, "rules_commit", pending.sequence)
+    else
+        pending.timeout:stop()
+        views[view].pending = nil
+        broker.state(view).adblock_pending = nil
+        webview.modify_load_block(view, "adblock", false)
+    end
 end)
 
 luakit.add_signal("web-extension-created", function (view)
-    require("lousy.broker").state(view).adblock_pending = true
-    new_web_extension_created = true
-    adblock_wm:emit_signal(view, "update_rules", _M.rules)
-    for name, list in pairs(_M.rules) do
-        local enabled = util.table.hasitem(list.opts, "Enabled")
-        adblock_wm:emit_signal(view, "list_set_enabled", name, enabled)
-    end
+    if not views[view] then return end
+    views[view].initialized = true
+    start_transfer(view)
 end)
 
 -- Add commands.
@@ -528,6 +658,9 @@ local mt = {
             assert(type(v) == "boolean", "property 'enabled' must be boolean")
             wrapped.enabled = v
             adblock_wm:emit_signal("enable", v)
+            if v then sync_rules() else
+                for view in pairs(views) do webview.modify_load_block(view, "adblock", false) end
+            end
             _M.refresh_views()
         end
     end,

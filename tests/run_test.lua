@@ -127,6 +127,9 @@ local function spawn_luakit_instance(config, ...)
         LUA_CPATH = util.getenv("LUA_CPATH"),
         DISPLAY = xvfb_display
     }
+    if select(1, ...) == "tests/async/test_renderer_replacement.lua" then
+        env.LD_PRELOAD = lfs.currentdir() .. "/tests/process_swap.so"
+    end
 
     -- HACK: make GStreamer shut up about not finding random .so files
     -- when it rebuilds its registry, which it does with every single

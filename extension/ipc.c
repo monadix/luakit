@@ -75,6 +75,14 @@ ipc_recv_scroll(ipc_endpoint_t *UNUSED(ipc), const guint8 *msg, guint length)
     lua_pop(L, 3);
 }
 
+static int
+send_eval_js_reply(lua_State *L)
+{
+    ipc_endpoint_t *ipc = lua_touserdata(L, lua_upvalueindex(1));
+    ipc_send_lua(ipc, IPC_TYPE_eval_js, L, 1, lua_gettop(L));
+    return 0;
+}
+
 void
 ipc_recv_eval_js(ipc_endpoint_t *ipc, const guint8 *msg, guint length)
 {
@@ -103,7 +111,20 @@ ipc_recv_eval_js(ipc_endpoint_t *ipc, const guint8 *msg, guint length)
     n = luajs_eval_js(L, ctx, script, source, 1, no_return);
     g_object_unref(ctx);
     /* Send [page_id, cb, ret] or [page_id, cb, nil, error] */
-    ipc_send_lua(ipc, IPC_TYPE_eval_js, L, -n-2, -1);
+    gint start = lua_gettop(L) - n - 1;
+    lua_pushlightuserdata(L, ipc);
+    lua_pushcclosure(L, send_eval_js_reply, 1);
+    for (gint i = 0; i < n + 2; i++)
+        lua_pushvalue(L, start + i);
+    if (lua_pcall(L, n + 2, 0, 0)) {
+        const gchar *error = lua_tostring(L, -1);
+        lua_pushvalue(L, top + 4);
+        lua_pushvalue(L, top + 5);
+        lua_pushnil(L);
+        lua_pushlstring(L, error ? error : "Cannot transfer JavaScript result",
+                error ? MIN(strlen(error), 8192) : strlen("Cannot transfer JavaScript result"));
+        ipc_send_lua(ipc, IPC_TYPE_eval_js, L, -4, -1);
+    }
     lua_settop(L, top);
 }
 
@@ -141,8 +162,9 @@ web_page_created_cb(WebKitWebExtension *UNUSED(ext), WebKitWebPage *page, gpoint
     g_object_set_data(G_OBJECT(page), "luakit-ipc", ipc);
     g_object_weak_ref(G_OBJECT(page), page_destroy_cb, ipc);
     g_signal_connect(page, "user-message-received", G_CALLBACK(page_message_cb), ipc);
-    ipc_header_t header = { .type = IPC_TYPE_page_created };
-    ipc_send(ipc, &header, NULL);
+    lua_pushinteger(common.L, getpid());
+    ipc_send_lua(ipc, IPC_TYPE_page_created, common.L, -1, -1);
+    lua_pop(common.L, 1);
 }
 
 static gboolean
@@ -154,9 +176,9 @@ extension_message_cb(WebKitWebExtension *UNUSED(ext), WebKitUserMessage *message
 void
 web_extension_connect(void)
 {
-    extension.ipc->status = IPC_ENDPOINT_CONNECTED;
     g_signal_connect(extension.ext, "user-message-received", G_CALLBACK(extension_message_cb), NULL);
     g_signal_connect(extension.ext, "page-created", G_CALLBACK(web_page_created_cb), NULL);
+    ipc_endpoint_activate(extension.ipc);
 }
 
 void

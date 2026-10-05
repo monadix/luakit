@@ -16,8 +16,9 @@ WebProcess; they cannot carry UI userdata, C functions or pointer references.
 Tables are copied as raw entries, even when they have metatables. Metatables and
 metamethod behavior do not cross IPC. Receivers get ordinary tables. Values must
 remain bounded: 16 MiB per message, 1 MiB per string, depth 32 and 100,000 values.
-Numeric/string keys, finite numbers, booleans, binary strings and nil arguments
-are supported. Cycles, userdata and pointers are rejected.
+Numeric/string/boolean/table keys, finite numbers, booleans, binary strings and
+nil arguments are supported. UI-to-Web messages also support serializable Lua
+function keys. Cycles, userdata and pointers are rejected.
 
 ### UI handlers must explicitly authorize renderer traffic
 

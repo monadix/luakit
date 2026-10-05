@@ -232,8 +232,8 @@ local function follow_all_hints(w)
     do_follow(w, true)
 end
 
-local function follow_func_cb(w, ret, mode)
-    if mode.func then mode.func(ret) end
+local function follow_func_cb(w, ret, mode, allowed)
+    if mode.func and allowed ~= false then mode.func(ret) end
 
     -- don't set mode if func() changed it (e.g. to command mode)
     if w:is_mode("follow") or w:is_mode("ex-follow") then
@@ -260,7 +260,8 @@ end
 
 local function pending_follow(_, view, id)
     local operation = broker.state(view).follow_operation
-    return operation ~= nil and operation.id == id and require("webview").window(view) == operation.window
+    return operation ~= nil and not operation.confirming and operation.id == id
+        and require("webview").window(view) == operation.window
 end
 
 follow_wm:add_web_signal("follow_func", broker.policy({ "id", function () return true end },
@@ -270,10 +271,10 @@ function (channel, view, id, ret)
     if operation.remaining < 1 then return false end
     -- The codec already validated custom results as bounded plain data.
     if type(operation.evaluator) == "function" then return true end
-    if ret ~= nil and (type(ret) ~= "string" or #ret > 8192 or ret:find("%z")) then return false end
     if operation.evaluator == "uri" or operation.evaluator == "src" or operation.evaluator == "parent_href" then
-        return ret == nil or broker.uri(ret)
+        return ret == nil or broker.navigation_uri(ret)
     end
+    if ret ~= nil and (type(ret) ~= "string" or #ret > 8192 or ret:find("%z")) then return false end
     return true
 end), function (_, view, _, ret)
     local state = broker.state(view)
@@ -281,7 +282,19 @@ end), function (_, view, _, ret)
     operation.remaining = operation.remaining - 1
     -- Mode teardown during this callback does not cancel the authorized batch.
     operation.dispatching = true
-    local ok, err = pcall(follow_func_cb, operation.window, ret, operation.mode)
+    local ok, err = pcall(function ()
+        local allowed = true
+        if ret ~= nil and (operation.evaluator == "uri" or operation.evaluator == "src"
+            or operation.evaluator == "parent_href") then
+            operation.confirming = true
+            allowed = broker.approve_navigation(view, ret)
+            operation.confirming = nil
+            if broker.state(view) ~= state or state.follow_operation ~= operation
+                or require("webview").window(view) ~= operation.window then return end
+        end
+        follow_func_cb(operation.window, ret, operation.mode, allowed)
+    end)
+    operation.confirming = nil
     operation.dispatching = nil
     if not ok or operation.remaining == 0 then
         if state.follow_operation == operation then state.follow_operation = nil end
@@ -297,14 +310,21 @@ end }, active_follow), function (_, view, n)
     broker.state(view).hints = n
     matches_cb(require("webview").window(view), n)
 end)
-follow_wm:add_web_signal("click_a_target_blank", broker.policy({ "id", "uri" }, function (channel, view, id)
+follow_wm:add_web_signal("click_a_target_blank", broker.policy({ "id", broker.navigation_uri },
+function (channel, view, id)
     if not pending_follow(channel, view, id) then return false end
     local operation = broker.state(view).follow_operation
     return operation.evaluator == "click" and operation.clicks > 0
 end), function (_, view, _, href)
     local operation = broker.state(view).follow_operation
     operation.clicks = operation.clicks - 1
-    operation.window:new_tab(href, { private = view.private })
+    local state = broker.state(view)
+    operation.confirming = true
+    local allowed = broker.approve_navigation(view, href)
+    operation.confirming = nil
+    if not allowed or broker.state(view) ~= state or state.follow_operation ~= operation
+        or require("webview").window(view) ~= operation.window then return end
+    operation.window:new_tab({ uri = href }, { private = view.private })
 end)
 
 new_mode("follow", {
@@ -442,7 +462,7 @@ add_binds("normal", {
                 prompt = "background tab", selector = "uri", evaluator = "uri",
                 func = function (uri)
                     assert(type(uri) == "string")
-                    w:new_tab(uri, { switch = false, private = w.view.private })
+                    w:new_tab({ uri = uri }, { switch = false, private = w.view.private })
                 end
             })
         end },
@@ -463,6 +483,11 @@ new_mode("ex-follow", {
     end,
 })
 
+-- Copying URI text uses the plain-data custom evaluator path.
+local function uri_text(element)
+    return element.src or element.href
+end
+
 add_binds("ex-follow", {
     { ";", [[Hint all focusable elements (as defined by the
         `follow.selectors.focus` selector) and focus the matched element.]],
@@ -478,7 +503,8 @@ add_binds("ex-follow", {
         selector) and set the primary selection to the matched elements URI.]],
         function (w)
             w:set_mode("follow", {
-                prompt = "yank", selector = "uri", evaluator = "uri",
+                prompt = "yank", selector = "uri",
+                evaluator = uri_text,
                 func = function (uri)
                     assert(type(uri) == "string")
                     uri = uri:gsub(" ", "%%20"):gsub("^mailto:", "")
@@ -510,7 +536,7 @@ add_binds("ex-follow", {
                 prompt = "open image", selector = "image", evaluator = "src",
                 func = function (src)
                     assert(type(src) == "string")
-                    w:navigate(src)
+                    w:navigate({ uri = src })
                 end
             })
         end },
@@ -524,7 +550,7 @@ add_binds("ex-follow", {
                 prompt = "tab image", selector = "image", evaluator = "src",
                 func = function (src)
                     assert(type(src) == "string")
-                    w:new_tab(src, { private = w.view.private })
+                    w:new_tab({ uri = src }, { private = w.view.private })
                 end
             })
         end },
@@ -538,7 +564,7 @@ add_binds("ex-follow", {
                 selector = "thumbnail", evaluator = "parent_href",
                 func = function (uri)
                     assert(type(uri) == "string")
-                    w:navigate(uri)
+                    w:navigate({ uri = uri })
                 end
             })
         end },
@@ -552,7 +578,7 @@ add_binds("ex-follow", {
                 evaluator = "parent_href",
                 func = function (uri)
                     assert(type(uri) == "string")
-                    w:new_tab(uri, { switch = false, private = w.view.private })
+                    w:new_tab({ uri = uri }, { switch = false, private = w.view.private })
                 end
             })
         end },
@@ -565,7 +591,7 @@ add_binds("ex-follow", {
                 prompt = "open", selector = "uri", evaluator = "uri",
                 func = function (uri)
                     assert(type(uri) == "string")
-                    w:navigate(uri)
+                    w:navigate({ uri = uri })
                 end
             })
         end },
@@ -578,7 +604,7 @@ add_binds("ex-follow", {
                 prompt = "open tab", selector = "uri", evaluator = "uri",
                 func = function (uri)
                     assert(type(uri) == "string")
-                    w:new_tab(uri, { private = w.view.private })
+                    w:new_tab({ uri = uri }, { private = w.view.private })
                 end
             })
         end },
@@ -591,7 +617,7 @@ add_binds("ex-follow", {
                 prompt = "background tab", selector = "uri", evaluator = "uri",
                 func = function (uri)
                     assert(type(uri) == "string")
-                    w:new_tab(uri, { switch = false, private = w.view.private })
+                    w:new_tab({ uri = uri }, { switch = false, private = w.view.private })
                 end
             })
         end },
@@ -604,7 +630,7 @@ add_binds("ex-follow", {
                 prompt = "open window", selector = "uri", evaluator = "uri",
                 func = function (uri)
                     assert(type(uri) == "string")
-                    window.new{uri}
+                    window.new{{ uri = uri }}
                 end
             })
         end },
@@ -614,7 +640,7 @@ add_binds("ex-follow", {
         selector) and generate a `:open` command with the elements URI.]],
         function (w)
             w:set_mode("follow", {
-                prompt = ":open", selector = "uri", evaluator = "uri",
+                prompt = ":open", selector = "uri", evaluator = uri_text,
                 func = function (uri)
                     assert(type(uri) == "string")
                     w:enter_cmd(":open " .. uri)
@@ -627,7 +653,7 @@ add_binds("ex-follow", {
         selector) and generate a `:tabopen` command with the elements URI.]],
         function (w)
             w:set_mode("follow", {
-                prompt = ":tabopen", selector = "uri", evaluator = "uri",
+                prompt = ":tabopen", selector = "uri", evaluator = uri_text,
                 func = function (uri)
                     assert(type(uri) == "string")
                     w:enter_cmd(":tabopen " .. uri)
@@ -640,7 +666,7 @@ add_binds("ex-follow", {
         selector) and generate a `:winopen` command with the elements URI.]],
         function (w)
             w:set_mode("follow", {
-                prompt = ":winopen", selector = "uri", evaluator = "uri",
+                prompt = ":winopen", selector = "uri", evaluator = uri_text,
                 func = function (uri)
                     assert(type(uri) == "string")
                     w:enter_cmd(":winopen " .. uri)

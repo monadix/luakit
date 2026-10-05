@@ -13,17 +13,46 @@ local enabled_rules = {}
 local page_whitelist = {}
 
 ui:add_signal("enable", function(_, _, e) enabled = e end)
-ui:add_signal("update_rules", function(_, page, r)
-    rules = r
-    if page then ui:emit_signal(page, "rules_updated") end
+local transfers = setmetatable({}, { __mode = "k" })
+local rules_id = 0
+
+ui:add_signal("rules_begin", function (_, page, id)
+    if not page then return end
+    transfers[page] = { id = id, sequence = 0, rules = {} }
+    ui:emit_signal(page, "rules_ack", id, 0)
 end)
-ui:add_signal("update_page_whitelist", function(_, page, wl)
-    page_whitelist = wl
-    if page then ui:emit_signal(page, "rules_updated") end
+ui:add_signal("rules_chunk", function (_, page, id, sequence, records)
+    local transfer = transfers[page]
+    if not transfer or transfer.id ~= id or sequence ~= transfer.sequence + 1 then return end
+    for _, record in ipairs(records) do
+        local path, value = record[1], record[2]
+        if #path == 0 then transfer.rules = value else
+            local target = transfer.rules
+            for i = 1, #path - 1 do target = target[path[i]] end
+            target[path[#path]] = value
+        end
+    end
+    transfer.sequence = sequence
+    ui:emit_signal(page, "rules_ack", id, sequence)
 end)
-ui:add_signal("list_set_enabled", function(_, _, list, enable)
-    enabled_rules[list] = enable and rules[list] or nil
+ui:add_signal("rules_commit", function (_, page, id, sequence)
+    local transfer = transfers[page]
+    if not transfer or transfer.id ~= id or sequence ~= transfer.sequence + 1 then return end
+    -- Several pages can share one process; an older snapshot must not replace
+    -- rules already committed by a newer transfer on another page.
+    if id > rules_id then
+        rules, enabled_rules, rules_id = transfer.rules, {}, id
+        for name, list in pairs(rules) do
+            if lousy.util.table.hasitem(list.opts or {}, "Enabled") then enabled_rules[name] = list end
+        end
+    end
+    transfers[page] = nil
+    ui:emit_signal(page, "rules_ack", id, sequence)
 end)
+ui:add_signal("rules_abort", function (_, page, id)
+    if transfers[page] and transfers[page].id == id then transfers[page] = nil end
+end)
+ui:add_signal("update_page_whitelist", function(_, _, wl) page_whitelist = wl end)
 
 local function domain_match(domain, opts)
     local res = false

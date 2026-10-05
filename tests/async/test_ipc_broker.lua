@@ -45,6 +45,59 @@ T.test_renderer_fatal_logs_are_nonfatal_and_bounded = function ()
     for _ = 1, 110 do util.inject(view, "log", { 5, "renderer", "bounded" }) end
 end
 
+T.test_modern_handlers_can_be_removed_without_removing_other_handlers = function ()
+    local c = ipc_channel("security_remove_test")
+    local policy = broker.policy({}, function () return true end)
+    local web_calls, local_calls = 0, 0
+    local handler = function () web_calls = web_calls + 1 end
+    local local_handler = function () local_calls = local_calls + 1 end
+    local args = { "reply", "security_remove_test" }
+    c:add_signal("reply", local_handler)
+    c:add_web_signal("reply", policy, handler)
+    c:remove_signal("reply", function () end)
+    util.inject(view, "lua_ipc", args)
+    assert(web_calls == 1)
+    c:remove_signal("reply", handler)
+    util.inject(view, "lua_ipc", args)
+    util.emit_local(c, "reply", {})
+    assert(web_calls == 1 and local_calls == 1)
+    c:add_web_signal("reply", policy, handler)
+    c:remove_signals("reply")
+    util.inject(view, "lua_ipc", args)
+    util.emit_local(c, "reply", {})
+    assert(web_calls == 1 and local_calls == 1)
+end
+
+T.test_modern_dispatch_observes_removal_and_replacement_during_policy_checks = function ()
+    local c = ipc_channel("security_replace_test")
+    local policy = broker.policy({}, function () return true end)
+    for _, phase in ipairs({ "validate", "authorize" }) do
+        for _, action in ipairs({ "remove", "replace" }) do
+            local old_calls, new_calls = 0, 0
+            local handler = function () old_calls = old_calls + 1 end
+            local changing_policy = {
+                validate = function () return true end,
+                authorize = function () return true end,
+            }
+            changing_policy[phase] = function ()
+                if action == "remove" then
+                    c:remove_signal("reply", handler)
+                else
+                    c:add_web_signal("reply", policy, function () new_calls = new_calls + 1 end)
+                end
+                return true
+            end
+            c:add_web_signal("reply", changing_policy, handler)
+            local args = { "reply", "security_replace_test" }
+            util.inject(view, "lua_ipc", args)
+            assert(old_calls == 0 and new_calls == 0)
+            util.inject(view, "lua_ipc", args)
+            assert(old_calls == 0 and new_calls == (action == "replace" and 1 or 0))
+            c:remove_signals("reply")
+        end
+    end
+end
+
 T.test_unknown_javascript_callbacks_are_rejected = function ()
     util.inject(view, "eval_js", { view.id, 9007199254740991, "forged" })
     util.inject(other, "eval_js", { view.id, 1, "cross-view" })

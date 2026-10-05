@@ -61,9 +61,18 @@ ipc_send_variant(ipc_endpoint_t *ipc, ipc_type_t type, GVariant *args)
     g_object_ref_sink(message);
     if (ipc->status == IPC_ENDPOINT_CONNECTED)
         send_message(ipc, message);
-    else if (g_queue_get_length(ipc->queue) < 256)
+    else if (g_queue_get_length(ipc->queue) < IPC_QUEUE_LIMIT)
         g_queue_push_tail(ipc->queue, g_object_ref(message));
     g_object_unref(message);
+}
+
+gboolean
+ipc_endpoint_can_send(ipc_endpoint_t *ipc, guint count)
+{
+    if (!ipc || ipc->status == IPC_ENDPOINT_FREED) return FALSE;
+    if (ipc->status == IPC_ENDPOINT_CONNECTED) return TRUE;
+    return count <= IPC_QUEUE_LIMIT &&
+        g_queue_get_length(ipc->queue) <= IPC_QUEUE_LIMIT - count;
 }
 
 void
@@ -104,7 +113,8 @@ ipc_receive(ipc_endpoint_t *ipc, gpointer data)
     if (g_strcmp0(webkit_user_message_get_name(message), "luakit-ipc-v1"))
         return FALSE;
     GVariant *params = webkit_user_message_get_parameters(message);
-    if (!params || g_variant_get_size(params) > IPC_MESSAGE_LIMIT ||
+    /* The payload limit excludes the fixed protocol envelope. */
+    if (!params || g_variant_get_size(params) > IPC_MESSAGE_LIMIT + 1024 ||
         !g_variant_is_of_type(params, G_VARIANT_TYPE("(usttv)")) ||
         !g_variant_is_normal_form(params))
         return TRUE;
@@ -117,7 +127,8 @@ ipc_receive(ipc_endpoint_t *ipc, gpointer data)
 #define X(name) if (!strcmp(operation, #name)) type = IPC_TYPE_##name;
     IPC_TYPES
 #undef X
-    gboolean valid = version == 1 && request > 0 && type != 0;
+    gboolean valid = version == 1 && request > 0 && type != 0 &&
+        g_variant_get_size(args) <= IPC_MESSAGE_LIMIT;
 #ifdef LUAKIT_WEB_EXTENSION
     /* Only the UI chooses document generations. */
     if (valid && ipc->target && WEBKIT_IS_WEB_PAGE(ipc->target)) {
@@ -128,12 +139,11 @@ ipc_receive(ipc_endpoint_t *ipc, gpointer data)
     /* Context traffic is diagnostic-only. It has no originating view. */
     if (!ipc->owner && type != IPC_TYPE_log) valid = FALSE;
     if (type != IPC_TYPE_page_created && generation != ipc->generation) valid = FALSE;
-    if (type == IPC_TYPE_page_created && ipc->status == IPC_ENDPOINT_CONNECTED) valid = FALSE;
     if (type == IPC_TYPE_lua_require_module || type == IPC_TYPE_lua_trusted || type == IPC_TYPE_lua_routes ||
         type == IPC_TYPE_extension_init || type == IPC_TYPE_crash) valid = FALSE;
 #endif
     gboolean lua = type == IPC_TYPE_lua_ipc || type == IPC_TYPE_lua_trusted || type == IPC_TYPE_lua_routes ||
-        type == IPC_TYPE_eval_js || type == IPC_TYPE_log || type == IPC_TYPE_scroll;
+        type == IPC_TYPE_eval_js || type == IPC_TYPE_log || type == IPC_TYPE_scroll || type == IPC_TYPE_page_created;
     if (!g_variant_is_of_type(args, lua ? G_VARIANT_TYPE("av") : G_VARIANT_TYPE("ay")))
         valid = FALSE;
     if (type == IPC_TYPE_log) {

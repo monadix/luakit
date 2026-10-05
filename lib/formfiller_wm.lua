@@ -53,9 +53,10 @@ local function fill_input(inputs, value)
         assert(type(input) == "dom_element")
         if input.type == "radio" or input.type == "checkbox" then
             -- Click the input if it isn't already in the desired state
-            local checked = input.checked == "checked"
-            if value and value ~= checked then
-                input:click()
+            local checked = input.checked
+            if value ~= checked then
+                if input.type == "radio" and value == false then input.checked = false
+                else input:click() end
             end
         else
             input.value = value
@@ -121,16 +122,29 @@ local stylesheet = [===[
 local dsl_coroutines = {}
 local add_operations = setmetatable({}, { __mode = "k" })
 
-ui:add_signal("dsl_extension_reply", function(_, _, id, call_id, value)
+local function resume_operation(id, ...)
     local pending = dsl_coroutines[id]
-    if pending and pending.call_id == call_id then coroutine.resume(pending.co, value) end
+    if not pending then return end
+    local ok, err = coroutine.resume(pending.co, ...)
+    if not ok then
+        dsl_coroutines[id] = nil
+        local text = tostring(err):sub(1, 8192):gsub("%z", "")
+        ui:emit_signal(pending.page, "failed", id, text)
+    end
+end
+
+ui:add_signal("dsl_extension_reply", function(_, _, id, call_id, value, err)
+    local pending = dsl_coroutines[id]
+    if pending and pending.call_id == call_id then resume_operation(id, value, err) end
 end)
 
 local function traverse(page, id, t)
     if type(t) == "table" and t.sentinel then
         dsl_coroutines[id].call_id = t.call_id
         ui:emit_signal(page, "dsl_extension_query", id, t.call_id)
-        return coroutine.yield()
+        local value, err = coroutine.yield()
+        if err then error(err, 0) end
+        return value
     elseif type(t) == "table" then
         for k, v in pairs(t) do t[k] = traverse(page, id, v) end
     end
@@ -148,8 +162,9 @@ local function apply(form, form_spec, page, id)
     for _, input_spec in ipairs(form_spec.inputs) do
         local matches = match("input", {"name", "id", "className", "type"}, input_spec, {form})
         if #matches > 0 then
-            local val = input_spec.value or input_spec.checked
-            if val then fill_input(matches, val) end
+            local val = input_spec.value
+            if val == nil then val = input_spec.checked end
+            if val ~= nil then fill_input(matches, val) end
             if input_spec.focus then matches[1]:focus() end
             if input_spec.select then matches[1]:select() end
         end
@@ -178,8 +193,8 @@ local function with_operation(page, id, specs, callback)
         callback()
         dsl_coroutines[id] = nil
     end)
-    dsl_coroutines[id] = { co = co }
-    coroutine.resume(co)
+    dsl_coroutines[id] = { co = co, page = page }
+    resume_operation(id)
 end
 
 local function get_form_spec_matches_on_page(page, form_specs)
@@ -231,7 +246,7 @@ local function formfiller_add (page, form)
         if not contains({"button", "submit", "hidden"}, input.type) then
             local attrs = attributes(input, {"id", "className", "name", "type"})
             if contains({"radio", "checkbox"}, input.type) then
-                attrs.checked = input.checked == "checked"
+                attrs.checked = input.checked
             else attrs.value = input.value or "" end
             data.inputs[#data.inputs + 1] = attrs
         end

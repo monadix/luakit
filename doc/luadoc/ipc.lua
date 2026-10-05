@@ -25,7 +25,8 @@
 --     ui:emit_signal(page, "test", "hello")
 --
 -- Messages support nil, booleans, finite numbers, binary strings and plain tables
--- with numeric or string keys. Argument counts and nil positions are preserved.
+-- with numeric, string, boolean or table keys. Argument counts and nil positions are
+-- preserved.
 -- Limits are 16 MiB per message, 1 MiB per string, depth 32, and 100,000 values.
 -- Web-to-UI functions and pointers are rejected. UI-to-Web messages support
 -- serializable Lua functions with bounded upvalues. Tables with metatables are

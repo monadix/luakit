@@ -9,6 +9,9 @@
 local _M = {}
 
 local states = setmetatable({}, { __mode = "k" })
+luakit.add_signal("web-extension-created", function (view)
+    if states[view] then states[view] = {} end
+end)
 
 --- Get UI-owned state, invalidated on navigation, destruction or process loss.
 -- @tparam widget view The originating webview.
@@ -42,6 +45,29 @@ function _M.uri(uri)
     local scheme = uri:match("^([%a][%w+.-]*):")
     scheme = scheme and scheme:lower()
     return scheme == "http" or scheme == "https" or scheme == "ftp" or scheme == "gopher"
+end
+
+--- Validate a renderer-selected navigation URI, including embedded images.
+function _M.navigation_uri(uri)
+    if type(uri) ~= "string" then return false end
+    local scheme = uri:match("^([%a][%w+.-]*):")
+    scheme = scheme and scheme:lower()
+    if not scheme or scheme == "javascript" then return false end
+    if scheme ~= "data" and scheme ~= "blob" and scheme ~= "about"
+        and not uri:match("^[%a][%w+.-]*://") then return false end
+    local limit = (scheme == "data" or scheme == "blob") and 1048576 or 8192
+    return #uri <= limit and not uri:find("[%z\1-\31\127]")
+        and (scheme == "data" or not uri:find(" "))
+end
+
+--- Approve navigation whose exact destination was selected by the renderer.
+-- Callers must consume their permit before this can enter the dialog loop,
+-- then check that their originating document is still current.
+function _M.approve_navigation(view, uri)
+    if not _M.navigation_uri(uri) then return false end
+    local scheme = uri:match("^([%a][%w+.-]*):"):lower()
+    if _M.uri(uri) or scheme == "data" or scheme == "blob" or scheme == "about" then return true end
+    return luakit.confirm(view, "Open privileged page", uri)
 end
 
 local function value_matches(spec, value)

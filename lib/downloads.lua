@@ -120,11 +120,19 @@ function _M.do_open(d, w)
     local data = dls[d]
     if not data or d.status ~= "finished" then return end
     w = w or window.bywidget[data.window]
+    if not w then
+        for _, candidate in pairs(window.bywidget) do
+            w = w or candidate
+            if candidate.win.focused then w = candidate; break end
+        end
+    end
+    if w and window.bywidget[w.win] ~= w then return end
     local view = w and w.view
     if not view then return end
     local target, mime = d.destination, d.mime_type
     if not luakit.confirm(view, "Open downloaded file", target) then return end
-    if dls[d] ~= data or d.status ~= "finished" or d.destination ~= target then return end
+    if dls[d] ~= data or d.status ~= "finished" or d.destination ~= target
+        or window.bywidget[w.win] ~= w then return end
     if _M.emit_signal("open-file", target, mime, w) ~= true then
         if w then
             w:error(string.format("Couldn't open: %q (%s)", d.destination,
@@ -148,7 +156,9 @@ status_timer:add_signal("timeout", function ()
 
             -- Open download
             if status == "finished" and data.opening then
-                _M.do_open(d)
+                local w = data.opening_window
+                data.opening, data.opening_window = nil, nil
+                _M.do_open(d, w)
             end
         end
     end
@@ -257,10 +267,12 @@ function _M.open(id, w)
 
     if d.status == "finished" then
         data.opening = false
+        data.opening_window = nil
         _M.do_open(d, w)
     else
         -- Set open flag to open file when download finishes
         data.opening = true
+        data.opening_window = w
     end
 end
 

@@ -300,7 +300,7 @@ end, nil, export_funcs, (function ()
         if type(value) ~= "table" or #value > 16 then return false end
         local count = 0
         for k, v in pairs(value) do
-            if not broker.id(k) or k > #value or not default_filter[v] then return false end
+            if not broker.id(k) or k > #value or (v ~= "speed" and not default_filter[v]) then return false end
             count = count + 1
         end
         return count == #value

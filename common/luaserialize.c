@@ -70,10 +70,7 @@ encode_value(lua_State *L, int idx, guint depth, codec_state_t *state)
         g_variant_builder_init(&b, G_VARIANT_TYPE("a(vv)"));
         lua_pushnil(L);
         while (lua_next(L, idx)) {
-            int keytype = lua_type(L, -2);
-            GVariant *key = NULL, *value = NULL;
-            if (keytype == LUA_TNUMBER || keytype == LUA_TSTRING)
-                key = encode_value(L, -2, depth + 1, state);
+            GVariant *key = encode_value(L, -2, depth + 1, state), *value = NULL;
             if (key)
                 value = encode_value(L, -1, depth + 1, state);
             if (!key || !value) {
@@ -179,11 +176,10 @@ validate_value(GVariant *v, guint depth, codec_state_t *state, gboolean key)
         return isfinite(g_variant_get_double(v));
     if (g_variant_is_of_type(v, G_VARIANT_TYPE("ay")))
         return g_variant_n_children(v) <= IPC_STRING_LIMIT;
-    if (key)
-        return FALSE;
-    if (g_variant_is_of_type(v, G_VARIANT_TYPE_UNIT) ||
-        g_variant_is_of_type(v, G_VARIANT_TYPE_BOOLEAN))
+    if (g_variant_is_of_type(v, G_VARIANT_TYPE_BOOLEAN))
         return TRUE;
+    if (g_variant_is_of_type(v, G_VARIANT_TYPE_UNIT))
+        return !key;
     gboolean table = g_variant_is_of_type(v, G_VARIANT_TYPE("a(vv)"));
     gboolean function = state->trusted && g_variant_is_of_type(v, G_VARIANT_TYPE("(ayav)"));
     if (!table && !function)

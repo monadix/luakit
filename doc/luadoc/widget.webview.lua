@@ -25,6 +25,13 @@
 -- @type boolean
 -- @readonly
 
+--- @property web_process_id
+-- The renderer-reported process ID, or zero before initialization or after
+-- process termination. This is diagnostic data from an untrusted renderer and
+-- may refer to its sandbox PID namespace; do not use it to authorize operations.
+-- @type number
+-- @readonly
+
 --- @method search
 -- Begin searching the contents of the webview.
 --

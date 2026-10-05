@@ -67,9 +67,18 @@ ipc_recv_eval_js(ipc_endpoint_t *ipc, const guint8 *msg, guint length)
 }
 
 void
-ipc_recv_page_created(ipc_endpoint_t *ipc, const void *UNUSED(msg), guint length)
+ipc_initialize_webview(ipc_endpoint_t *ipc)
 {
-    if (!ipc->owner || length != 0) return;
+    if (!ipc->owner) return;
+    widget_t *w = ipc->owner;
+    guint64 page_id = webkit_web_view_get_page_id(WEBKIT_WEB_VIEW(w->widget));
+    if (ipc->status == IPC_ENDPOINT_CONNECTED && ipc->initialized_page_id == page_id)
+        return;
+    if (ipc->status == IPC_ENDPOINT_CONNECTED) {
+        webview_reset_endpoint(w);
+        ipc->creation_notified = FALSE;
+    }
+    ipc->initialized_page_id = page_id;
     /* Initialize the page's generation before releasing queued UI operations. */
     ipc->status = IPC_ENDPOINT_CONNECTED;
     /* Include requests made while this renderer was starting. require caches
@@ -81,6 +90,23 @@ ipc_recv_page_created(ipc_endpoint_t *ipc, const void *UNUSED(msg), guint length
         ipc_send(ipc, &header, NULL);
     }
     webview_connect_to_endpoint(ipc->owner, ipc);
+}
+
+void
+ipc_recv_page_created(ipc_endpoint_t *ipc, const guint8 *msg, guint length)
+{
+    lua_State *L = common.L;
+    int top = lua_gettop(L);
+    int n = lua_deserialize_range(L, msg, length);
+    if (ipc->owner && n == 1 && lua_type(L, -1) == LUA_TNUMBER) {
+        double pid = lua_tonumber(L, -1);
+        if (pid >= 1 && pid <= G_MAXINT && pid == (gint)pid) {
+            /* Diagnostic data only; WebKit binds the view and its transport. */
+            webview_set_web_process_id(ipc->owner, pid);
+            ipc_initialize_webview(ipc);
+        }
+    }
+    lua_settop(L, top);
 }
 
 static gboolean

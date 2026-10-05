@@ -1,5 +1,7 @@
 /*
- * Copyright © 2016 Aidan Holm <aidanholm@gmail.com>
+ * tests/process_swap.c - enable cross-site swaps in the renderer regression
+ *
+ * Copyright © 2017 Aidan Holm <aidanholm@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,17 +18,16 @@
  *
  */
 
-#ifndef LUAKIT_IPC_H
-#define LUAKIT_IPC_H
+#include <webkit2/webkit2.h>
 
-#include "common/ipc.h"
-
-void ipc_init(void);
-void ipc_endpoint_remove_from_endpoints(ipc_endpoint_t *);
-#include "clib/widget.h"
-void ipc_bind_webview(widget_t *);
-void ipc_initialize_webview(ipc_endpoint_t *);
-
-#endif
+/* Preloaded only by the renderer replacement test. Preserve production context
+ * defaults while exercising WebKit's construct-only process swap setting. */
+WebKitWebContext *
+webkit_web_context_new_with_website_data_manager(WebKitWebsiteDataManager *manager)
+{
+    return g_object_new(WEBKIT_TYPE_WEB_CONTEXT,
+            "website-data-manager", manager,
+            "process-swap-on-cross-site-navigation-enabled", TRUE, NULL);
+}
 
 // vim: ft=c:et:sw=4:ts=8:sts=4:tw=80

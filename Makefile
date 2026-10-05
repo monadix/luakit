@@ -127,10 +127,13 @@ uninstall:
 tests/util.so: tests/util.c Makefile
 	$(CC) -fPIC $(CFLAGS) $(CPPFLAGS) -shared $< $(LDFLAGS) -o $@
 
-tests/broker_util.so: tests/broker_util.c Makefile
+tests/broker_util.so: tests/broker_util.c $(HEADS) Makefile
 	$(CC) -fPIC $(CFLAGS) $(CPPFLAGS) -shared $< $(LDFLAGS) -o $@
 
-run-tests: luakit luakit.so tests/util.so tests/broker_util.so
+tests/process_swap.so: tests/process_swap.c Makefile
+	$(CC) -fPIC $(CFLAGS) $(CPPFLAGS) -shared $< $(LDFLAGS) -o $@
+
+run-tests: luakit luakit.so tests/util.so tests/broker_util.so tests/process_swap.so
 	@$(LUA_BIN_NAME) tests/run_test.lua
 
 newline: options;@echo

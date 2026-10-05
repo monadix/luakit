@@ -174,16 +174,32 @@ local function prepare(view, kind, specs)
     return id, copy(specs)
 end
 
+local function extension_error(err)
+    local ok, text = pcall(tostring, err)
+    return (ok and type(text) == "string" and text or "formfiller extension failed"):sub(1, 8192):gsub("%z", "")
+end
+
 formfiller_wm:add_web_signal("dsl_extension_query", broker.policy({ "id", "id" }, function (_, view, id, call_id)
     local op = operations(view)[id]
     return op ~= nil and op.calls[call_id] ~= nil
 end), function (_, view, id, call_id)
-    local call = operations(view)[id].calls[call_id]
+    local state = broker.state(view)
+    local op = state.forms[id]
+    local call = op.calls[call_id]
     if not call.done then
         call.done = true
-        call.result = dsl_extensions[call.key](unpack(call.args))
+        local ok, result = pcall(dsl_extensions[call.key], unpack(call.args))
+        if ok then call.result = result
+        else call.error = extension_error(result) end
     end
-    formfiller_wm:emit_signal(view, "dsl_extension_reply", id, call_id, call.result)
+    if broker.state(view) ~= state or state.forms[id] ~= op then return end
+    local ok, err = pcall(formfiller_wm.emit_signal, formfiller_wm, view,
+        "dsl_extension_reply", id, call_id, call.result, call.error)
+    if not ok then
+        call.result = nil
+        call.error = extension_error(err)
+        formfiller_wm:emit_signal(view, "dsl_extension_reply", id, call_id, nil, call.error)
+    end
 end)
 
 --- Extend the formfiller DSL with additional functions. This takes a table of

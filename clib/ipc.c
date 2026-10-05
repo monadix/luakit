@@ -27,6 +27,7 @@
 #include "common/luaserialize.h"
 
 #define REG_KEY "luakit.registry.ipc_channel"
+static guint64 routes_revision;
 
 gint
 ipc_channel_send(lua_State *L)
@@ -55,6 +56,8 @@ ipc_channel_send(lua_State *L)
     lua_pushinteger(L, page_id);
 
     if (ipc) {
+        if (!ipc_endpoint_can_send(ipc, ipc->routes_revision_sent == routes_revision ? 1 : 2))
+            return luaL_error(L, "IPC queue is full");
         ipc_channel_send_routes(L, ipc);
         ipc_send_lua_trusted(ipc, L, 2, lua_gettop(L));
     } else {
@@ -69,7 +72,6 @@ ipc_channel_send(lua_State *L)
 }
 
 #define BROKER_KEY "luakit.registry.web_broker"
-static guint64 routes_revision;
 
 /* Leave the channel's broker table on the stack. */
 static void
@@ -178,6 +180,9 @@ ipc_channel_add_web_signal(lua_State *L)
         lua_getfield(L, -1, "legacy");
         if (lua_toboolean(L, -1)) return luaL_error(L, "cannot mix legacy and modern web handlers");
         lua_pop(L, 1);
+        /* A dispatch snapshot must see replacement immediately. */
+        lua_pushnil(L);
+        lua_setfield(L, -2, "handler");
     }
     lua_pop(L, 1);
     lua_newtable(L);
@@ -237,7 +242,7 @@ ipc_channel_add_signal(lua_State *L)
 }
 
 static void
-remove_legacy(lua_State *L, gboolean all)
+remove_broker_signal(lua_State *L, gboolean all)
 {
     ipc_channel_t *channel = luaH_check_ipc_channel(L, 1);
     const char *name = luaL_checkstring(L, 2);
@@ -284,6 +289,16 @@ remove_legacy(lua_State *L, gboolean all)
             }
             routes_revision++;
             ipc_channel_send_routes(L, NULL);
+        } else {
+            lua_getfield(L, record, "handler");
+            gboolean remove = all || lua_rawequal(L, -1, 3);
+            lua_pop(L, 1);
+            if (remove) {
+                lua_pushnil(L);
+                lua_setfield(L, record, "handler");
+                lua_pushnil(L);
+                lua_setfield(L, signals, name);
+            }
         }
     }
     lua_settop(L, top);
@@ -291,13 +306,13 @@ remove_legacy(lua_State *L, gboolean all)
 
 gint ipc_channel_remove_signal(lua_State *L)
 {
-    remove_legacy(L, FALSE);
+    remove_broker_signal(L, FALSE);
     return luaH_object_remove_signal_simple(L);
 }
 
 gint ipc_channel_remove_signals(lua_State *L)
 {
-    remove_legacy(L, TRUE);
+    remove_broker_signal(L, TRUE);
     return luaH_object_remove_signals_simple(L);
 }
 

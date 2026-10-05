@@ -26,14 +26,17 @@ local function request(w, action)
 end
 
 for _, action in ipairs({ "navigate", "new_tab", "new_window", "download" }) do
-    wm:add_web_signal(action, broker.policy({ "uri" }, function (_, view)
+    wm:add_web_signal(action, broker.policy({ broker.navigation_uri }, function (_, view)
         return broker.state(view).selected == action and webview.window(view) ~= nil
     end), function (_, view, uri)
-        broker.state(view).selected = nil
+        local state = broker.state(view)
+        state.selected = nil
         local w = webview.window(view)
-        if action == "new_window" then window.new({uri})
-        elseif action == "navigate" then w:navigate(uri)
-        elseif action == "new_tab" then w:new_tab(uri)
+        if not broker.approve_navigation(view, uri) or broker.state(view) ~= state
+            or webview.window(view) ~= w then return end
+        if action == "new_window" then window.new({{ uri = uri }})
+        elseif action == "navigate" then w:navigate({ uri = uri })
+        elseif action == "new_tab" then w:new_tab({ uri = uri })
         else w:download(uri) end
     end)
 end

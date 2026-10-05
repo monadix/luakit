@@ -139,6 +139,66 @@ local function evaluate(script)
     return test.wait()
 end
 
+T.test_untransferable_javascript_results_report_errors_without_crashing = function ()
+    w:navigate("about:blank")
+    test.wait_for_view(w.view)
+    local crashed = false
+    local on_crash = function () crashed = true end
+    w.view:add_signal("crashed", on_crash)
+    for _, script in ipairs({ "NaN", "Infinity", "-Infinity", "({ value: NaN })", "'x'.repeat(1048577)" }) do
+        local value, err = evaluate(script)
+        assert(value == nil and type(err) == "string" and #err > 0)
+        assert(not crashed)
+    end
+    assert(evaluate("42") == 42)
+    w.view:remove_signal("crashed", on_crash)
+end
+
+T.test_payload_limit_excludes_the_protocol_envelope = function ()
+    local channel = ipc_channel("payload_limit_test")
+    local calls = 0
+    channel:add_web_signal("reply", {
+        validate = function () return true end,
+        authorize = function () return true end,
+    }, function () calls = calls + 1 end)
+    local args = { "reply" }
+    for i = 2, 16 do args[i] = string.rep("x", 1048576) end
+    args[17], args[18] = string.rep("x", 1024), "payload_limit_test"
+    local length = 16777216 - util.encoded_size(args) + 1024
+    args[17] = string.rep("x", length)
+    while util.encoded_size(args) > 16777216 do
+        length = length - 1
+        args[17] = string.rep("x", length)
+    end
+    assert(util.encoded_size(args) >= 16777200)
+    util.inject(w.view, "lua_ipc", args)
+    assert(calls == 1)
+    channel:remove_signals("reply")
+end
+
+T.test_downloads_page_renders_the_bundled_speed_filter = function ()
+    local downloads = require("downloads")
+    local records
+    for i = 1, 20 do
+        local name, value = debug.getupvalue(downloads.get_all, i)
+        if name == "dls" then records = value; break end
+    end
+    assert(records)
+    local d = {
+        status = "started", destination = "/tmp/speed-fixture", uri = "https://example.com/file",
+        current_size = 1024, total_size = 2048,
+    }
+    records[d] = { id = "speed-fixture", created = luakit.time(), speed = 1024 }
+    w:navigate("luakit://downloads/")
+    test.wait_for_view(w.view)
+    test.wait_until(function ()
+        return evaluate('document.querySelector(\'.download[data-id="speed-fixture"]\') !== null')
+    end)
+    records[d] = nil
+    w:navigate("about:blank")
+    test.wait_for_view(w.view)
+end
+
 T.test_custom_labels_and_follow_evaluator_roundtrip = function ()
     w:navigate(test.http_server() .. "broker.html")
     test.wait_for_view(w.view)
@@ -229,6 +289,92 @@ T.test_formfiller_fills_using_ui_owned_dsl_call = function ()
     os.remove(path)
 end
 
+T.test_formfiller_errors_release_initial_and_resumed_operations = function ()
+    local path = luakit.data_dir .. "/forms.lua"
+    local action
+    for _, binding in ipairs(modes.get_mode("normal").binds) do
+        if binding[2].desc == "Load formfiller form (use first profile)." then action = binding[2].func end
+    end
+    assert(action)
+    local original_error, errors, calls = w.error, 0, 0
+    w.error = function (_, text) assert(type(text) == "string"); errors = errors + 1 end
+    formfiller.extend({ failure_value = function () calls = calls + 1; return "value" end })
+    for i, value in ipairs({ '"value"', 'failure_value()' }) do
+        local f = assert(io.open(path, "w"))
+        f:write('on "broker%.html" { form { id = "login", submit = true, '
+            .. 'input { name = "username", value = ' .. value .. ' } } }')
+        f:close()
+        w:navigate(test.http_server() .. "broker.html")
+        test.wait_for_view(w.view)
+        action(w)
+        assert(next(broker.state(w.view).forms or {}) ~= nil)
+        test.wait_until(function () return errors == i end)
+        assert(next(broker.state(w.view).forms or {}) == nil)
+    end
+    assert(calls == 1)
+    w.error = original_error
+    os.remove(path)
+end
+
+T.test_formfiller_extension_errors_release_operations_and_allow_retry = function ()
+    local path = luakit.data_dir .. "/forms.lua"
+    local f = assert(io.open(path, "w"))
+    f:write('on "broker%.html" { form { id = "login", input { name = "username", value = failure_value() } } }')
+    f:close()
+    w:navigate(test.http_server() .. "broker.html")
+    test.wait_for_view(w.view)
+    local action
+    for _, binding in ipairs(modes.get_mode("normal").binds) do
+        if binding[2].desc == "Load formfiller form (use first profile)." then action = binding[2].func end
+    end
+    assert(action)
+    local original_error, errors, calls = w.error, 0, 0
+    w.error = function (_, text)
+        assert(type(text) == "string" and #text > 0 and #text <= 8192)
+        errors = errors + 1
+    end
+    for i, extension in ipairs({
+        function () error("extension failed") end,
+        function () error(setmetatable({}, { __tostring = function () error("nested error") end })) end,
+        function () error(setmetatable({}, { __tostring = function () return {} end })) end,
+        function () return string.rep("x", 1048577) end,
+        function () local cycle = {}; cycle.self = cycle; return cycle end,
+    }) do
+        formfiller.extend({ failure_value = function () calls = calls + 1; return extension() end })
+        action(w)
+        test.wait_until(function () return errors == i end)
+        assert(calls == i and next(broker.state(w.view).forms or {}) == nil)
+    end
+    formfiller.extend({ failure_value = function () calls = calls + 1; return "retry value" end })
+    action(w)
+    test.wait_until(function () return next(broker.state(w.view).forms or {}) == nil end)
+    assert(calls == 6 and evaluate('document.querySelector("input").value') == "retry value")
+    w.error = original_error
+    os.remove(path)
+end
+
+T.test_formfiller_extension_results_do_not_cross_documents = function ()
+    local channel = require_web_module("formfiller_wm")
+    local mt = debug.getmetatable(channel)
+    local original_emit, calls, replies = mt.emit_signal, 0, 0
+    mt.emit_signal = function (self, view, signal, ...)
+        if signal == "dsl_extension_reply" then replies = replies + 1 end
+        return original_emit(self, view, signal, ...)
+    end
+    formfiller.extend({ changed_document = function ()
+        calls = calls + 1
+        w.view:emit_signal("load-status", "provisional")
+        return "old document credential"
+    end })
+    broker.state(w.view).forms = {
+        [123456] = { calls = { { key = "changed_document", args = {} } } },
+    }
+    send("formfiller_wm", "dsl_extension_query", 123456, 1)
+    mt.emit_signal = original_emit
+    assert(calls == 1 and replies == 0)
+    assert(broker.state(w.view).forms == nil)
+end
+
 T.test_all_download_opening_requires_current_ui_approval = function ()
     local downloads = require("downloads")
     local d = { status = "finished", destination = "/tmp/test-download", mime_type = "application/pdf" }
@@ -262,6 +408,118 @@ T.test_all_download_opening_requires_current_ui_approval = function ()
     assert(calls == 1)
     records[d] = nil
     luakit.confirm, downloads.emit_signal = original_confirm, original_emit
+end
+
+T.test_deferred_download_open_preserves_explicit_window = function ()
+    local downloads = require("downloads")
+    local function upvalue(func, wanted)
+        for i = 1, 30 do
+            local name, value = debug.getupvalue(func, i)
+            if name == wanted then return value end
+        end
+        error("missing upvalue " .. wanted)
+    end
+    local records = upvalue(downloads.do_open, "dls")
+    local status_timer = upvalue(downloads.add, "status_timer")
+    local d = { status = "started", destination = "/tmp/deferred-download", mime_type = "application/pdf" }
+    local data = { id = "deferred-test", last_status = "started" }
+    records[d] = data
+    local original_confirm, original_emit = luakit.confirm, downloads.emit_signal
+    local confirmations, opens = 0, 0
+    luakit.confirm = function (view)
+        assert(view == w.view)
+        confirmations = confirmations + 1
+        return true
+    end
+    downloads.emit_signal = function (signal, _, _, opening_window)
+        if signal == "open-file" then
+            assert(opening_window == w)
+            opens = opens + 1
+            return true
+        end
+    end
+    local function finish(opening_window)
+        d.status, data.last_status = "started", "started"
+        downloads.open(data.id, opening_window)
+        assert(opens == confirmations)
+        d.status = "finished"
+        status_timer:start()
+        status_timer:emit_signal("timeout")
+        assert(not data.opening and data.opening_window == nil)
+    end
+    finish(w) -- No opts.window: completion must retain open(id, w).
+    assert(opens == 1 and confirmations == 1)
+    finish({ win = {}, view = w.view }) -- A closed/unregistered explicit window.
+    assert(opens == 1 and confirmations == 1)
+    data.window = w.win
+    finish(nil) -- Existing originating-window fallback.
+    assert(opens == 2 and confirmations == 2)
+    downloads.do_open(d, w)
+    assert(opens == 3)
+    records[d] = nil
+    luakit.confirm, downloads.emit_signal = original_confirm, original_emit
+end
+
+T.test_yank_link_preserves_mailto_uri_support = function ()
+    w:navigate(test.http_server() .. "broker.html")
+    test.wait_for_view(w.view)
+    evaluate('document.body.innerHTML = \'<a href="mailto:user@example.com">mail</a>\';')
+    w:set_mode("ex-follow")
+    require("lousy.bind").hit(w, modes.get_mode("ex-follow").binds, {}, "y", {})
+    test.wait_until(function () return broker.state(w.view).hints == 1 end)
+    require("lousy.bind").hit(w, modes.get_mode("follow").binds, {}, "Return", {})
+    test.wait_until(function () return broker.state(w.view).follow_operation == nil end)
+    assert(luakit.selection.primary == "user@example.com")
+end
+
+T.test_formfiller_preserves_checked_and_unchecked_inputs = function ()
+    local path = luakit.data_dir .. "/forms.lua"
+    os.remove(path)
+    w:navigate(test.http_server() .. "broker.html")
+    test.wait_for_view(w.view)
+    evaluate([=[
+        document.querySelector('form').innerHTML =
+            '<input name="yes" type="checkbox" checked><input name="no" type="checkbox">' +
+            '<input name="radio" type="radio">';
+    ]=])
+    local editor = require("editor")
+    local original_edit, edited = editor.edit, false
+    editor.edit = function (file) assert(file == path); edited = true end
+    w:set_mode("formfiller-add")
+    -- Wait for the renderer to create the form hint before selecting it.
+    evaluate("true")
+    for _, binding in ipairs(modes.get_mode("formfiller-add").binds) do
+        if binding[2].desc == "Add the currently focused form to the formfiller file." then
+            binding[2].func(w)
+        end
+    end
+    test.wait_until(function () return edited end)
+    editor.edit = original_edit
+    local f = assert(io.open(path))
+    local saved = f:read("*a")
+    f:close()
+    assert(saved:find("checked = true", 1, true) and saved:find("checked = false", 1, true))
+    saved = saved:gsub("submit = true", "submit = false"):gsub("autofill = true", "autofill = false")
+    f = assert(io.open(path, "w"))
+    f:write(saved)
+    f:close()
+    local function fill()
+        for _, binding in ipairs(modes.get_mode("normal").binds) do
+            if binding[2].desc == "Load formfiller form (use first profile)." then binding[2].func(w) end
+        end
+        test.wait_until(function () return next(broker.state(w.view).forms or {}) == nil end)
+        assert(evaluate([=[
+            document.querySelector('[name=yes]').checked && !document.querySelector('[name=no]').checked
+                && !document.querySelector('[name=radio]').checked
+        ]=]))
+    end
+    fill() -- Already correct: filling must not toggle the checked box off.
+    evaluate([=[
+        document.querySelector('[name=yes]').checked = false;
+        document.querySelector('[name=no]').checked = true;
+        document.querySelector('[name=radio]').checked = true;
+    ]=])
+    fill() -- Both true and false saved values must be restored.
 end
 
 return T

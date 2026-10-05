@@ -45,6 +45,7 @@ typedef enum { IPC_TYPES } ipc_type_t;
 #undef X
 
 #define IPC_TYPE_ANY (-1)
+#define IPC_QUEUE_LIMIT 256
 
 /** Internal description of a raw operation; never sent as a wire header. */
 typedef struct _ipc_header_t {
@@ -102,6 +103,7 @@ typedef struct _ipc_endpoint_t {
     GQueue *queue;
     gint refcount;
     gboolean creation_notified;
+    guint64 initialized_page_id; /* UI-observed WebKit page, not a renderer claim */
     guint64 generation;
     guint64 next_request;
     guint64 received_request;
@@ -114,6 +116,7 @@ typedef struct _ipc_endpoint_t {
 
 void ipc_endpoint_bind(ipc_endpoint_t *, GObject *, gpointer);
 void ipc_endpoint_activate(ipc_endpoint_t *);
+gboolean ipc_endpoint_can_send(ipc_endpoint_t *, guint);
 gboolean ipc_receive(ipc_endpoint_t *, gpointer);
 void ipc_send_variant(ipc_endpoint_t *, ipc_type_t, GVariant *);
 void ipc_send_lua_trusted(ipc_endpoint_t *, lua_State *, gint, gint);
