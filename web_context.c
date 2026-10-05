@@ -107,8 +107,11 @@ web_context_add_path_to_sandbox(const char *path, gboolean read_only, gchar **re
         free(resolved);
         return FALSE;
     }
-    webkit_web_context_add_path_to_sandbox(web_context, resolved, read_only);
-    if (strcmp(canonical, resolved))
+    /* WebKit already mounts /etc read-only. Extra binds below it can fail
+     * when a parent is a symlink into that read-only tree (NixOS profiles). */
+    if (!(read_only && path_contains("/etc", resolved)))
+        webkit_web_context_add_path_to_sandbox(web_context, resolved, read_only);
+    if (strcmp(canonical, resolved) && !(read_only && path_contains("/etc", canonical)))
         webkit_web_context_add_path_to_sandbox(web_context, canonical, read_only);
     g_free(canonical);
     free(resolved);

@@ -52,6 +52,11 @@ for _, path in ipairs({"/", "relative", "/no-such-luakit-path", luakit.data_dir,
     assert(not pcall(luakit.add_path_to_sandbox, path))
 end
 luakit.add_path_to_sandbox(WRITEDIR, false)
+-- WebKit already exposes /etc read-only; rebinding a symlink there can fail
+-- when its target or parents are on the read-only NixOS store mount.
+if require("lfs").attributes("/etc/os-release") then
+    luakit.add_path_to_sandbox("/etc/os-release")
+end
 local view = widget{ type = "webview" }
 local window = widget{ type = "window" }
 window.child = view
