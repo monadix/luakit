@@ -24,6 +24,8 @@
 void web_extension_connect(void);
 struct _WebKitWebPage;
 ipc_endpoint_t *web_page_get_endpoint(struct _WebKitWebPage *);
+struct _WebKitWebPage *ipc_channel_context_push(struct _WebKitWebPage *);
+void ipc_channel_context_pop(struct _WebKitWebPage *);
 
 void ipc_recv_lua_require_module(ipc_endpoint_t *from, const void *msg, guint length);
 void ipc_recv_lua_ipc(ipc_endpoint_t *from, const void *msg, guint length);

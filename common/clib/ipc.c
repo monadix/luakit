@@ -77,6 +77,9 @@ ipc_channel_class_setup(lua_State *L)
     {
         LUA_OBJECT_META(ipc_channel)
         { "emit_signal", ipc_channel_send },
+        { "add_signal", ipc_channel_add_signal },
+        { "remove_signal", ipc_channel_remove_signal },
+        { "remove_signals", ipc_channel_remove_signals },
         { "add_web_signal", ipc_channel_add_web_signal },
         { "__gc", luaH_ipc_channel_gc },
         { NULL, NULL }
@@ -93,6 +96,15 @@ ipc_channel_class_setup(lua_State *L)
 }
 
 #ifdef LUAKIT_WEB_EXTENSION
+gint ipc_channel_add_signal(lua_State *L)
+{
+    if (!lua_isnoneornil(L, 4)) return luaL_error(L, "broker policies are UI-only");
+    return luaH_object_add_signal_simple(L);
+}
+
+gint ipc_channel_remove_signal(lua_State *L) { return luaH_object_remove_signal_simple(L); }
+gint ipc_channel_remove_signals(lua_State *L) { return luaH_object_remove_signals_simple(L); }
+
 gint
 ipc_channel_add_web_signal(lua_State *L)
 {

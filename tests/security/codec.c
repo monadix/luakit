@@ -36,11 +36,40 @@ reject(lua_State *L, GVariant *value)
     g_variant_unref(args);
 }
 
+static int
+encode_for_test(lua_State *L)
+{
+    GByteArray *out = g_byte_array_new();
+    lua_serialize_range(L, out, 1, 1);
+    g_byte_array_unref(out);
+    return 0;
+}
+
 int
 main(void)
 {
     lua_State *L = luaL_newstate();
     luaL_openlibs(L);
+    lua_pushcfunction(L, encode_for_test);
+    lua_setglobal(L, "encode_for_test");
+    g_assert_cmpint(luaL_dostring(L,
+        "local t = {}; t.self = t; assert(not pcall(encode_for_test, t)); "
+        "assert(not pcall(encode_for_test, function() end)); "
+        "assert(not pcall(encode_for_test, io.stdout)); "
+        "assert(not pcall(encode_for_test, string.rep('x', 1024 * 1024 + 1)))"), ==, 0);
+    g_assert_cmpint(luaL_dostring(L,
+        "return setmetatable({ raw = 'value' }, { "
+        "__index = function() error('metamethod executed') end, "
+        "__pairs = function() error('metamethod executed') end })"), ==, 0);
+    GByteArray *snapshot = g_byte_array_new();
+    lua_serialize_range(L, snapshot, 1, 1);
+    lua_settop(L, 0);
+    g_assert_cmpint(lua_deserialize_range(L, snapshot->data, snapshot->len), ==, 1);
+    g_assert(!lua_getmetatable(L, 1));
+    lua_getfield(L, 1, "raw");
+    g_assert_cmpstr(lua_tostring(L, -1), ==, "value");
+    lua_settop(L, 0);
+    g_byte_array_unref(snapshot);
     lua_pushnil(L);
     lua_pushboolean(L, TRUE);
     lua_pushnumber(L, 1.25);

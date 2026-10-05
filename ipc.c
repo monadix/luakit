@@ -30,6 +30,7 @@ void run_javascript_finished(ipc_endpoint_t *, const guint8 *, guint);
 
 IPC_NO_HANDLER(lua_require_module)
 IPC_NO_HANDLER(lua_trusted)
+IPC_NO_HANDLER(lua_routes)
 IPC_NO_HANDLER(extension_init)
 IPC_NO_HANDLER(crash)
 
@@ -73,6 +74,7 @@ ipc_recv_page_created(ipc_endpoint_t *ipc, const void *UNUSED(msg), guint length
     ipc->status = IPC_ENDPOINT_CONNECTED;
     /* Include requests made while this renderer was starting. require caches
      * each module, so already-loaded modules do not duplicate handlers. */
+    ipc_channel_send_routes(common.L, ipc);
     web_module_load_modules_on_endpoint(ipc);
     if (ipc->generation > 0) {
         ipc_header_t header = { .type = IPC_TYPE_extension_init };

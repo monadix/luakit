@@ -129,10 +129,10 @@ ipc_receive(ipc_endpoint_t *ipc, gpointer data)
     if (!ipc->owner && type != IPC_TYPE_log) valid = FALSE;
     if (type != IPC_TYPE_page_created && generation != ipc->generation) valid = FALSE;
     if (type == IPC_TYPE_page_created && ipc->status == IPC_ENDPOINT_CONNECTED) valid = FALSE;
-    if (type == IPC_TYPE_lua_require_module || type == IPC_TYPE_lua_trusted ||
+    if (type == IPC_TYPE_lua_require_module || type == IPC_TYPE_lua_trusted || type == IPC_TYPE_lua_routes ||
         type == IPC_TYPE_extension_init || type == IPC_TYPE_crash) valid = FALSE;
 #endif
-    gboolean lua = type == IPC_TYPE_lua_ipc || type == IPC_TYPE_lua_trusted ||
+    gboolean lua = type == IPC_TYPE_lua_ipc || type == IPC_TYPE_lua_trusted || type == IPC_TYPE_lua_routes ||
         type == IPC_TYPE_eval_js || type == IPC_TYPE_log || type == IPC_TYPE_scroll;
     if (!g_variant_is_of_type(args, lua ? G_VARIANT_TYPE("av") : G_VARIANT_TYPE("ay")))
         valid = FALSE;
@@ -169,6 +169,7 @@ ipc_endpoint_new(const gchar *name)
     ipc->queue = g_queue_new();
     ipc->refcount = 1;
     ipc->generation = 1;
+    ipc->routes_revision_sent = G_MAXUINT64;
     return ipc;
 }
 
@@ -194,6 +195,7 @@ void
 ipc_endpoint_invalidate(ipc_endpoint_t *ipc)
 {
     ipc->generation++;
+    ipc->routes_revision_sent = G_MAXUINT64;
     while (!g_queue_is_empty(ipc->queue))
         g_object_unref(g_queue_pop_head(ipc->queue));
 }

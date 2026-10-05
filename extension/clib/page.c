@@ -19,6 +19,7 @@
 #include <jsc/jsc.h>
 
 #include "extension/extension.h"
+#include "extension/ipc.h"
 #include "extension/clib/page.h"
 #include "extension/clib/dom_document.h"
 #include "extension/clib/dom_element.h"
@@ -71,7 +72,9 @@ send_request_cb(WebKitWebPage *web_page, WebKitURIRequest *request,
     lua_pushstring(L, uri);
     lua_pushvalue(L, -3);
 
+    WebKitWebPage *previous = ipc_channel_context_push(web_page);
     gint ret = luaH_object_emit_signal(L, -3, "send-request", 2, 1);
+    ipc_channel_context_pop(previous);
 
     if (ret) {
         /* First argument: redirect url or false to block */
@@ -120,7 +123,9 @@ document_loaded_cb(WebKitWebPage *web_page, page_t *UNUSED(page))
 {
     lua_State *L = common.L;
     luaH_page_from_web_page(L, web_page);
+    WebKitWebPage *previous = ipc_channel_context_push(web_page);
     luaH_object_emit_signal(L, -1, "document-loaded", 0, 0);
+    ipc_channel_context_pop(previous);
     lua_pop(L, 1);
 }
 

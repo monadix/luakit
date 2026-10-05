@@ -19,6 +19,7 @@
  */
 
 #include "extension/extension.h"
+#include "extension/ipc.h"
 #include "extension/luajs.h"
 #include "extension/clib/luakit.h"
 #include "extension/clib/page.h"
@@ -126,7 +127,9 @@ luakit_lib_emit_page_created(lua_State *L, ipc_endpoint_t *ipc)
     /* Every page waits for its own UI-selected generation and module load. */
     ipc->creation_notified = TRUE;
     luaH_page_from_web_page(L, WEBKIT_WEB_PAGE(ipc->target));
+    WebKitWebPage *previous = ipc_channel_context_push(WEBKIT_WEB_PAGE(ipc->target));
     signal_object_emit(L, luakit_class.signals, "page-created", 1, 0);
+    ipc_channel_context_pop(previous);
 }
 
 // vim: ft=c:et:sw=4:ts=8:sts=4:tw=80

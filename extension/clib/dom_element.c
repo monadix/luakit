@@ -28,6 +28,7 @@
 #include "common/luauniq.h"
 #include "common/util.h"
 #include "extension/extension.h"
+#include "extension/ipc.h"
 
 #define REG_KEY "luakit.uniq.registry.dom_element"
 
@@ -426,7 +427,9 @@ luaH_dom_element_emit_dom_event(lua_State *L, WebKitDOMEvent *event, gint oud, c
             lua_remove(L, - nargs - nbfunc - 2 + i);
             top = lua_gettop(L) - 2 - nargs;
 
+            WebKitWebPage *previous = ipc_channel_context_push(obj->page);
             luaH_dofunction(L, nargs + 1, LUA_MULTRET);
+            ipc_channel_context_pop(previous);
             ret = lua_gettop(L) - top;
 
             /* ignore all return values */

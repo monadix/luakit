@@ -24,6 +24,7 @@
 #include "luah.h"
 #include "extension/extension.h"
 #include "extension/luajs.h"
+#include "extension/ipc.h"
 #include "extension/clib/page.h"
 #include "common/ipc.h"
 #include "common/lualib.h"
@@ -144,7 +145,9 @@ luaJS_registered_function_callback(GPtrArray *args, struct cb_data *user_data)
 
     /* TODO: handle callback failure? */
     luaH_object_push(L, ctx->ref);
+    WebKitWebPage *previous = ipc_channel_context_push(webkit_web_extension_get_page(extension.ext, ctx->page_id));
     luaH_dofunction(L, argc + 3, 0);
+    ipc_channel_context_pop(previous);
 
     lua_settop(L, top);
     return result;

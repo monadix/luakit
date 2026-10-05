@@ -35,7 +35,12 @@ ipc_channel_t *luaH_check_ipc_channel(lua_State *L, gint idx);
 gint luaH_ipc_channel_new(lua_State *L);
 gint ipc_channel_send(lua_State *L);
 gint ipc_channel_add_web_signal(lua_State *);
+gint ipc_channel_add_signal(lua_State *);
+gint ipc_channel_remove_signal(lua_State *);
+gint ipc_channel_remove_signals(lua_State *);
+
 struct _ipc_endpoint_t;
+void ipc_channel_send_routes(lua_State *, struct _ipc_endpoint_t *);
 void ipc_channel_recv_web(lua_State *, struct _ipc_endpoint_t *, const gchar *, guint);
 void ipc_channel_recv_trusted(lua_State *, const gchar *, guint);
 void ipc_channel_recv(lua_State *L, const gchar *arg, guint arglen);

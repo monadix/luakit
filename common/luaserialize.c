@@ -45,7 +45,7 @@ static GVariant *encode_value(lua_State *, int, guint, codec_state_t *);
 static GVariant *
 encode_value(lua_State *L, int idx, guint depth, codec_state_t *state)
 {
-    if (depth > IPC_DEPTH_LIMIT || ++state->count > IPC_VALUE_LIMIT)
+    if (depth > IPC_DEPTH_LIMIT || ++state->count > IPC_VALUE_LIMIT || !lua_checkstack(L, 4))
         return NULL;
     idx = luaH_absindex(L, idx);
     switch (lua_type(L, idx)) {
@@ -65,10 +65,7 @@ encode_value(lua_State *L, int idx, guint depth, codec_state_t *state)
         return g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, s, len, 1);
       }
       case LUA_TTABLE: {
-        if (lua_getmetatable(L, idx)) {
-            lua_pop(L, 1);
-            return NULL;
-        }
+        /* Match historical behavior: snapshot raw entries, never metamethods. */
         GVariantBuilder b;
         g_variant_builder_init(&b, G_VARIANT_TYPE("a(vv)"));
         lua_pushnil(L);
@@ -131,12 +128,20 @@ encode_range(lua_State *L, GByteArray *out, int start, int end, gboolean trusted
     g_variant_builder_init(&b, G_VARIANT_TYPE("av"));
     start = luaH_absindex(L, start);
     end = luaH_absindex(L, end);
+    char context[400] = "message";
+    if (lua_type(L, start) == LUA_TSTRING) {
+        int channel = lua_type(L, end) == LUA_TNUMBER ? end - 1 : end;
+        if (channel > start && lua_type(L, channel) == LUA_TSTRING)
+            g_snprintf(context, sizeof(context), "%.*s/%.*s", 256, lua_tostring(L, channel),
+                    128, lua_tostring(L, start));
+    }
     for (int i = start; i <= end; i++) {
         GVariant *v = encode_value(L, i, 0, &state);
         if (!v) {
             g_variant_builder_clear(&b);
             g_byte_array_unref(out);
-            luaL_error(L, "IPC accepts bounded plain data only");
+            luaL_error(L, "IPC %s: unsupported or oversized argument #%d; use bounded raw data%s",
+                    context, i - start + 1, trusted ? " or serializable Lua functions" : " (no functions or pointers)");
             return;
         }
         g_variant_builder_add(&b, "v", v);
@@ -146,7 +151,7 @@ encode_range(lua_State *L, GByteArray *out, int start, int end, gboolean trusted
     if (size > IPC_MESSAGE_LIMIT) {
         g_variant_unref(args);
         g_byte_array_unref(out);
-        luaL_error(L, "IPC message too large");
+        luaL_error(L, "IPC %s: message exceeds 16 MiB", context);
         return;
     }
     g_byte_array_append(out, g_variant_get_data(args), size);

@@ -16,6 +16,7 @@
  *
  */
 
+#include <math.h>
 #include "extension/ipc.h"
 #include "extension/extension.h"
 #include "extension/clib/page.h"
@@ -24,15 +25,93 @@
 
 #define REG_KEY "luakit.registry.ipc_channel"
 
+#define ROUTES_KEY "luakit.registry.legacy_routes"
+static guint64 routes_revision;
+static WebKitWebPage *current_page;
+
+WebKitWebPage *
+ipc_channel_context_push(WebKitWebPage *page)
+{
+    WebKitWebPage *previous = current_page;
+    current_page = page ? g_object_ref(page) : NULL;
+    return previous;
+}
+
+void
+ipc_channel_context_pop(WebKitWebPage *previous)
+{
+    g_clear_object(&current_page);
+    current_page = previous;
+}
+
+void
+ipc_recv_lua_routes(ipc_endpoint_t *UNUSED(ipc), const guint8 *msg, guint length)
+{
+    lua_State *L = common.L;
+    int top = lua_gettop(L);
+    int n = lua_deserialize_range(L, msg, length);
+    if (n == 2 && lua_type(L, top + 1) == LUA_TNUMBER && lua_istable(L, top + 2)) {
+        double revision = lua_tonumber(L, top + 1);
+        if (revision >= routes_revision && revision <= 9007199254740991.0 && revision == (guint64)revision) {
+            routes_revision = revision;
+            lua_setfield(L, LUA_REGISTRYINDEX, ROUTES_KEY);
+        }
+    }
+    lua_settop(L, top);
+}
+
+static guint
+legacy_page_arg(lua_State *L, const char *channel, const char *signal)
+{
+    int top = lua_gettop(L);
+    guint index = 0;
+    lua_getfield(L, LUA_REGISTRYINDEX, ROUTES_KEY);
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, channel);
+        if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, signal);
+            double value = lua_tonumber(L, -1);
+            if (lua_type(L, -1) == LUA_TNUMBER && isfinite(value) && value >= 1 &&
+                value <= IPC_VALUE_LIMIT && value == (guint)value) index = value;
+        }
+    }
+    lua_settop(L, top);
+    return index;
+}
+
 gint
 ipc_channel_send(lua_State *L)
 {
-    ipc_channel_t *ipc_channel = luaH_check_ipc_channel(L, 1);
-    page_t *page = luaH_check_page(L, 2);
-    luaL_checkstring(L, 3);
-    ipc_endpoint_t *ipc = web_page_get_endpoint(page->page);
-    lua_remove(L, 2);
-    lua_pushstring(L, ipc_channel->name);
+    ipc_channel_t *channel = luaH_check_ipc_channel(L, 1);
+    WebKitWebPage *page;
+    if (lua_type(L, 2) == LUA_TSTRING) {
+        const char *signal = lua_tostring(L, 2);
+        page = current_page;
+        guint index = legacy_page_arg(L, channel->name, signal);
+        if (index) {
+            int arg = index + 2;
+            double id = lua_tonumber(L, arg);
+            if (lua_type(L, arg) != LUA_TNUMBER || !isfinite(id) || id < 1 ||
+                id > 9007199254740991.0 || id != (guint64)id)
+                return luaL_error(L, "IPC %s/%s: invalid legacy page ID at payload argument %d",
+                        channel->name, signal, index);
+            WebKitWebPage *selected = webkit_web_extension_get_page(extension.ext, id);
+            if (!selected || (page && page != selected))
+                return luaL_error(L, "IPC %s/%s: legacy page ID is closed or conflicts with callback page",
+                        channel->name, signal);
+            page = selected;
+        }
+        if (!page) return luaL_error(L,
+                "IPC %s/%s: ambiguous legacy send; pass a page or declare legacy_page_arg in the UI policy",
+                channel->name, signal);
+    } else {
+        page = luaH_check_page(L, 2)->page;
+        luaL_checkstring(L, 3);
+        lua_remove(L, 2);
+    }
+    ipc_endpoint_t *ipc = web_page_get_endpoint(page);
+    if (!ipc) return luaL_error(L, "IPC %s/%s: page transport is not initialized", channel->name, lua_tostring(L, 2));
+    lua_pushstring(L, channel->name);
     ipc_send_lua(ipc, IPC_TYPE_lua_ipc, L, 2, lua_gettop(L));
     return 0;
 }
@@ -54,17 +133,12 @@ channel_recv(lua_State *L, const gchar *arg, guint arglen, gboolean trusted)
     lua_pop(L, 2);
     n -= 3;
 
-    if (trusted && !(
-        (!strcmp(module_name, "select_wm") && !strcmp(signame, "set_label_maker")) ||
-        (!strcmp(module_name, "follow_wm") && !strcmp(signame, "enter")))) {
-        goto done;
-    }
-
+    WebKitWebPage *page = NULL;
     /* Prepend the page object, or nil */
     if (page_id) {
-        WebKitWebPage *web_page = webkit_web_extension_get_page(extension.ext, page_id);
-        if (!web_page) goto done;
-        luaH_page_from_web_page(L, web_page);
+        page = webkit_web_extension_get_page(extension.ext, page_id);
+        if (!page) goto done;
+        luaH_page_from_web_page(L, page);
     } else
         lua_pushnil(L);
     lua_insert(L, -n-1);
@@ -80,7 +154,9 @@ channel_recv(lua_State *L, const gchar *arg, guint arglen, gboolean trusted)
     /* Move the module before arguments, and emit signal */
     if (!lua_isnil(L, -1)) {
         lua_insert(L, -n-1);
+        WebKitWebPage *previous = ipc_channel_context_push(page);
         luaH_object_emit_signal(L, -n-1, signame, n, 0);
+        ipc_channel_context_pop(previous);
     }
 done:
     g_free(signame);

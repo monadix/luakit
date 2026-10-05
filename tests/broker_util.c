@@ -23,6 +23,20 @@
 #include "widgets/webview.h"
 #include "common/ipc.h"
 #include "common/luaserialize.h"
+#include "common/clib/ipc.h"
+
+static int
+emit_local(lua_State *L)
+{
+    luaH_check_ipc_channel(L, 1);
+    const char *name = luaL_checkstring(L, 2);
+    luaL_checktype(L, 3, LUA_TTABLE);
+    guint count = lua_objlen(L, 3);
+    luaL_checkstack(L, count + 2, "too many test arguments");
+    for (guint i = 1; i <= count; i++) lua_rawgeti(L, 3, i);
+    luaH_object_emit_signal(L, 1, name, count, 0);
+    return 0;
+}
 
 static GVariant *
 arguments(lua_State *L, int idx)
@@ -134,6 +148,7 @@ int
 luaopen_tests_broker_util(lua_State *L)
 {
     static const struct luaL_Reg funcs[] = {
+        { "emit_local", emit_local },
         { "inject", inject },
         { "terminate_process", terminate_process },
         { "request_navigation", request_navigation },

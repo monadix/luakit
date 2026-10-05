@@ -27,6 +27,7 @@
     X(lua_require_module) \
     X(lua_ipc) \
     X(lua_trusted) \
+    X(lua_routes) \
     X(scroll) \
     X(extension_init) \
     X(eval_js) \
@@ -104,6 +105,7 @@ typedef struct _ipc_endpoint_t {
     guint64 generation;
     guint64 next_request;
     guint64 received_request;
+    guint64 routes_revision_sent;
     gpointer owner; /* UI-owned widget; never supplied by the renderer */
     gint64 log_window;
     guint log_count;

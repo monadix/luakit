@@ -10,6 +10,7 @@ f:write([=[
 local ui = ipc_channel("startup_wm")
 luakit.add_signal("page-created", function (page)
     ui:emit_signal(page, "created", luakit.web_process_id)
+    ui:emit_signal("legacy-created", page.id, luakit.web_process_id)
 end)
 ]=])
 f:close()
@@ -17,6 +18,17 @@ luakit.add_path_to_sandbox(path)
 package.path = path .. "/?.lua;" .. package.path
 local channel = require_web_module("startup_wm")
 local notifications = {}
+local legacy_notifications = {}
+channel:add_signal("legacy-created", function (_, id, pid)
+    assert(not legacy_notifications[id])
+    legacy_notifications[id] = pid
+end, {
+    legacy_page_arg = 1,
+    validate = function (_, view, id, pid, ...)
+        return id == view.id and type(pid) == "number" and select("#", ...) == 0
+    end,
+    authorize = function () return true end,
+})
 channel:add_web_signal("created", {
     validate = function (_, _, pid, ...) return type(pid) == "number" and select("#", ...) == 0 end,
     authorize = function () return true end,
@@ -39,6 +51,9 @@ T.test_related_pages_can_send_from_page_created = function ()
     local second = w.tabs.children[1] == first and w.tabs.children[2] or w.tabs.children[1]
     test.wait_until(function () return notifications[second] ~= nil end)
     assert(notifications[first] == notifications[second])
+    test.wait_until(function () return legacy_notifications[second.id] ~= nil end)
+    assert(legacy_notifications[first.id] == notifications[first])
+    assert(legacy_notifications[second.id] == notifications[second])
     assert(os.remove(path .. "/startup_wm.lua"))
     assert(require("lfs").rmdir(path))
 end
