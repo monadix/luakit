@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added asynchronous Lua permission decisions by returning a function from a webview's `permission-request` handler.
 - Added GitHub Actions CI workflows with cross-platform testing across Linux distributions (Alpine, Arch, Debian, Ubuntu), BSDs (FreeBSD, OpenBSD, NetBSD), and other systems.
 
 ### Changed

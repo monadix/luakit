@@ -379,5 +379,20 @@
 -- description.
 -- @treturn boolean `true` to grant the permission request, and `false` to deny
 -- it. If no value is returned, a default action is used.
+-- @treturn function Alternatively, return a function accepting `respond` to
+-- decide asynchronously. Call `respond(true)` to allow or `respond(false)` to
+-- deny. It returns `true` only for the first decision on a pending request;
+-- subsequent or expired decisions return `false`. Navigation, renderer
+-- replacement, view destruction, garbage collection of an unused responder,
+-- or an error in the returned function denies the pending request.
+--
+--     view:add_signal("permission-request", function (_, kind, devices)
+--         if kind == "user-media" then
+--             return function (respond)
+--                 -- Keep respond until your UI receives the user's answer.
+--                 show_permission_prompt(devices, respond)
+--             end
+--         end
+--     end)
 
 -- vim: et:sw=4:ts=8:sts=4:tw=80

@@ -75,7 +75,54 @@ typedef struct {
 
     ipc_endpoint_t *ipc;
     pid_t web_process_id;
+    GSList *permission_requests;
 } webview_data_t;
+
+typedef struct {
+    webview_data_t *owner;
+    WebKitPermissionRequest *request;
+} permission_request_t;
+
+/* Detach before calling WebKit: resolving a request can reenter the UI. */
+static gboolean
+permission_request_finish(permission_request_t *pending, gint decision)
+{
+    WebKitPermissionRequest *request = pending->request;
+    if (!request) return FALSE;
+    pending->owner->permission_requests = g_slist_remove(
+            pending->owner->permission_requests, pending);
+    pending->owner = NULL;
+    pending->request = NULL;
+    if (decision > 0)
+        webkit_permission_request_allow(request);
+    else if (decision == 0)
+        webkit_permission_request_deny(request);
+    g_object_unref(request);
+    return TRUE;
+}
+
+static void
+permission_requests_cancel(webview_data_t *d)
+{
+    while (d->permission_requests)
+        permission_request_finish(d->permission_requests->data, 0);
+}
+
+static int
+permission_request_gc(lua_State *L)
+{
+    permission_request_finish(luaL_checkudata(L, 1, "luakit.permission-request"), 0);
+    return 0;
+}
+
+static int
+permission_request_respond(lua_State *L)
+{
+    gboolean allow = luaH_checkboolean(L, 1);
+    permission_request_t *pending = lua_touserdata(L, lua_upvalueindex(1));
+    lua_pushboolean(L, permission_request_finish(pending, allow));
+    return 1;
+}
 
 static WebKitWebView *related_view;
 
@@ -413,6 +460,7 @@ load_changed_cb(WebKitWebView* UNUSED(v), WebKitLoadEvent e, widget_t *w)
 
     if (e == WEBKIT_LOAD_STARTED) {
         g_clear_pointer(&d->navigation_uri, g_free);
+        permission_requests_cancel(d);
         run_javascript_cancel(d->ipc);
         ipc_endpoint_invalidate(d->ipc);
         if (d->ipc->status == IPC_ENDPOINT_CONNECTED) {
@@ -804,16 +852,34 @@ permission_request_cb(WebKitWebView *UNUSED(v), WebKitPermissionRequest *request
         return FALSE;
 
     gint argc = lua_gettop(L) - top;
-    luaH_object_push(L, w->ref);
-    lua_insert(L, top+1);
-    gint ret = luaH_object_emit_signal(L, top+1, "permission-request", argc, 1);
-    if (ret) {
-        if (lua_toboolean(L, -1))
-            webkit_permission_request_allow(request);
-        else
-            webkit_permission_request_deny(request);
+    permission_request_t *pending = lua_newuserdata(L, sizeof(*pending));
+    pending->owner = w->data;
+    pending->request = g_object_ref(request);
+    pending->owner->permission_requests = g_slist_prepend(
+            pending->owner->permission_requests, pending);
+    if (luaL_newmetatable(L, "luakit.permission-request")) {
+        lua_pushcfunction(L, permission_request_gc);
+        lua_setfield(L, -2, "__gc");
     }
-    lua_pop(L, 1);
+    lua_setmetatable(L, -2);
+    /* Keep the userdata alive even if a handler navigates or destroys the view. */
+    lua_insert(L, top+1);
+    luaH_object_push(L, w->ref);
+    lua_insert(L, top+2);
+    gint ret = luaH_object_emit_signal(L, top+2, "permission-request", argc, 1);
+    if (ret && lua_isfunction(L, -1)) {
+        if (pending->request) {
+            lua_pushvalue(L, top+1);
+            lua_pushcclosure(L, permission_request_respond, 1);
+            lua_pushvalue(L, -2);
+            if (!luaH_dofunction(L, 1, 0))
+                permission_request_finish(pending, 0);
+        }
+    } else {
+        /* No Lua decision: preserve the request type's WebKit default. */
+        permission_request_finish(pending, ret ? lua_toboolean(L, -1) : -1);
+    }
+    lua_settop(L, top);
     return ret > 0;
 }
 
@@ -1333,6 +1399,7 @@ webview_destructor(widget_t *w)
     g_idle_remove_by_data(w);
 
     g_assert(d->ipc);
+    permission_requests_cancel(d);
     run_javascript_cancel(d->ipc);
     d->ipc->owner = NULL;
     ipc_endpoint_decref(d->ipc);
@@ -1378,6 +1445,7 @@ webview_crashed_cb(WebKitWebView *UNUSED(view), widget_t *w)
     webview_data_t *d = w->data;
     d->web_process_id = 0;
     g_clear_pointer(&d->navigation_uri, g_free);
+    permission_requests_cancel(d);
     run_javascript_cancel(d->ipc);
     ipc_endpoint_disconnect(d->ipc);
     d->ipc->creation_notified = FALSE;
@@ -1400,6 +1468,7 @@ webview_terminated_cb(WebKitWebView *view, WebKitWebProcessTerminationReason UNU
 void
 webview_reset_endpoint(widget_t *w)
 {
+    permission_requests_cancel(w->data);
     ipc_endpoint_t *ipc = webview_get_endpoint(w);
     run_javascript_cancel(ipc);
     ipc_endpoint_invalidate(ipc);

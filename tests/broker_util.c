@@ -265,6 +265,28 @@ terminate_process(lua_State *L)
     return 0;
 }
 
+static gboolean
+mock_geolocation_start(WebKitGeolocationManager *manager, gpointer UNUSED(data))
+{
+    WebKitGeolocationPosition *position = webkit_geolocation_position_new(0, 0, 1);
+    webkit_geolocation_manager_update_position(manager, position);
+    webkit_geolocation_position_free(position);
+    return TRUE;
+}
+
+static int
+mock_geolocation(lua_State *L)
+{
+    widget_t *w = luaH_checkwebview(L, 1);
+    WebKitGeolocationManager *manager = webkit_web_context_get_geolocation_manager(
+            webkit_web_view_get_context(WEBKIT_WEB_VIEW(w->widget)));
+    if (!g_object_get_data(G_OBJECT(manager), "luakit-test-mock-geolocation")) {
+        g_signal_connect(manager, "start", G_CALLBACK(mock_geolocation_start), NULL);
+        g_object_set_data(G_OBJECT(manager), "luakit-test-mock-geolocation", GINT_TO_POINTER(1));
+    }
+    return 0;
+}
+
 int
 luaopen_tests_broker_util(lua_State *L)
 {
@@ -280,6 +302,7 @@ luaopen_tests_broker_util(lua_State *L)
         { "finalize_signal_object", finalize_signal_object },
         { "process_swap_enabled", process_swap_enabled },
         { "terminate_process", terminate_process },
+        { "mock_geolocation", mock_geolocation },
         { "request_navigation", request_navigation },
         { "confirm_response", confirm_response },
         { "confirm_navigation", confirm_navigation },
