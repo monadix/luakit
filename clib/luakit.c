@@ -129,8 +129,8 @@ luaH_luakit_selection_table_push(lua_State *L)
     return 1;
 }
 
-/** Shows a Gtk save dialog.
- * \see http://developer.gnome.org/gtk/stable/GtkDialog.html
+/** Shows a native save dialog, using the desktop portal when available.
+ * \see https://docs.gtk.org/gtk3/class.FileChooserNative.html
  *
  * \param L The Lua VM state.
  * \return The number of elements pushed on stack.
@@ -160,7 +160,11 @@ luaH_luakit_save_file(lua_State *L)
     const gchar *default_folder = luaL_checkstring(L, 3);
     const gchar *default_name = luaL_checkstring(L, 4);
 
-#if GTK_CHECK_VERSION(3,10,0)
+#if GTK_CHECK_VERSION(3,20,0)
+    GtkFileChooserNative *dialog = gtk_file_chooser_native_new(title,
+            parent_window, GTK_FILE_CHOOSER_ACTION_SAVE, "_Save", "_Cancel");
+    gtk_native_dialog_set_modal(GTK_NATIVE_DIALOG(dialog), TRUE);
+#elif GTK_CHECK_VERSION(3,10,0)
     GtkWidget *dialog = gtk_file_chooser_dialog_new(title,
             parent_window,
             GTK_FILE_CHOOSER_ACTION_SAVE,
@@ -181,14 +185,23 @@ luaH_luakit_save_file(lua_State *L)
     gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), default_name);
     gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dialog), TRUE);
 
-    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+#if GTK_CHECK_VERSION(3,20,0)
+    gint response = gtk_native_dialog_run(GTK_NATIVE_DIALOG(dialog));
+#else
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+#endif
+    if (response == GTK_RESPONSE_ACCEPT) {
         gchar *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
         lua_pushstring(L, filename);
         g_free(filename);
     } else
         lua_pushnil(L);
 
+#if GTK_CHECK_VERSION(3,20,0)
+    g_object_unref(dialog);
+#else
     gtk_widget_destroy(dialog);
+#endif
     return 1;
 }
 
