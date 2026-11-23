@@ -68,7 +68,7 @@ webview_stylesheet_set_enabled(widget_t *w, lstylesheet_t *stylesheet, gboolean 
         d->stylesheets = g_list_prepend(d->stylesheets, stylesheet);
         d->stylesheet_added = TRUE;
     } else {
-        d->stylesheets = g_list_remove_link(d->stylesheets, item);
+        d->stylesheets = g_list_delete_link(d->stylesheets, item);
         d->stylesheet_removed = TRUE;
     }
 

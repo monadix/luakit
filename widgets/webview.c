@@ -1409,6 +1409,7 @@ webview_destructor(widget_t *w)
     g_free(d->uri);
     g_free(d->navigation_uri);
     g_free(d->hover);
+    g_list_free(d->stylesheets);
     g_object_unref(G_OBJECT(d->user_content));
     if (d->cert)
         g_object_unref(G_OBJECT(d->cert));
