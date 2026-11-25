@@ -273,3 +273,4 @@ win_xid
 replace
 stack
 visible_child
+terminate_web_process

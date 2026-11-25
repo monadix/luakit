@@ -670,6 +670,14 @@ luaH_webview_reload(lua_State *L)
 }
 
 static gint
+luaH_webview_terminate_web_process(lua_State *L)
+{
+    webview_data_t *d = luaH_checkwvdata(L, 1);
+    webkit_web_view_terminate_web_process(d->view);
+    return 0;
+}
+
+static gint
 luaH_webview_reload_bypass_cache(lua_State *L)
 {
     webview_data_t *d = luaH_checkwvdata(L, 1);
@@ -937,6 +945,7 @@ luaH_webview_index(lua_State *L, widget_t *w, luakit_token_t token)
       /* use is_loading property instead of this function */
       PF_CASE(LOADING,              luaH_webview_loading)
       PF_CASE(RELOAD,               luaH_webview_reload)
+      PF_CASE(TERMINATE_WEB_PROCESS, luaH_webview_terminate_web_process)
       PF_CASE(RELOAD_BYPASS_CACHE,  luaH_webview_reload_bypass_cache)
       PF_CASE(SSL_TRUSTED,          luaH_webview_ssl_trusted)
       PF_CASE(STOP,                 luaH_webview_stop)
