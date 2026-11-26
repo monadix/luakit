@@ -62,8 +62,6 @@ typedef struct {
     gboolean is_committed;
     gboolean is_failed;
     gboolean private;
-    /** Whether this view's renderer is being terminated by us */
-    gboolean terminating;
 
     /** Document size */
     gint doc_w, doc_h;
@@ -1409,15 +1407,6 @@ webview_destructor(widget_t *w)
 
     g_idle_remove_by_data(w);
 
-    /* WebKit keeps a closed page's WebPageProxy, its frame and therefore its
-     * WebProcess alive, so the renderer would linger at full heap size. Ask
-     * for it explicitly; this bypasses the UI-process bookkeeping that never
-     * decides to terminate the process. */
-    if (d->view && !d->terminating) {
-        d->terminating = TRUE;
-        webkit_web_view_terminate_web_process(d->view);
-    }
-
     g_assert(d->ipc);
     permission_requests_cancel(d);
     run_javascript_cancel(d->ipc);
@@ -1464,10 +1453,6 @@ webview_crashed_cb(WebKitWebView *UNUSED(view), widget_t *w)
 {
     /* Invalidate all capabilities belonging to the terminated renderer. */
     webview_data_t *d = w->data;
-
-    /* We asked for this at teardown; the view is already being destroyed. */
-    if (d->terminating)
-        return FALSE;
     d->web_process_id = 0;
     g_clear_pointer(&d->navigation_uri, g_free);
     permission_requests_cancel(d);
